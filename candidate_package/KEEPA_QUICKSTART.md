@@ -77,5 +77,8 @@ curl "https://api.keepa.com/product?key=$KEY&domain=1&code=034000681006"
 - Token 成本公式（追踪响应里的 `tokensConsumed`）
 - `stats.current[]` 哪个下标是 BuyBox、哪个是 sales rank（读文档）
 - 如何从 `buyBoxSellerIdHistory` 解码出 Amazon 的 BuyBox 占比
+- **UPC 哪些格式 Keepa 接受、哪些不接受** —— 拿 11/12/13/14 位的
+  样例 UPC 各打一次试试，看哪些返回 0 个结果。返回 0 的就是需要
+  在你这边预处理的
 
 这些都是本笔试的一部分 —— 不要指望我们把这些直接告诉你。

@@ -80,6 +80,24 @@ Keepa 请求必须**批量**。重跑必须**幂等**。
 | `/ask` | POST | `{"question": "..."}` —— 自然语言 → SQL → 执行 → 回答 |
 | `/chat` | POST | `{"session_id": "...", "message": "..."}` —— 多轮、有状态 |
 
+### `/upc` —— UPC 输入处理（必做）
+
+Keepa 的 `/product?code=` 对 UPC 格式有**特定要求** —— 不是所有长度
+和形态的输入都能被它直接识别。`data/upc_test_cases.json` 里 7 个
+测试输入中，**有些原样发给 Keepa 是会返回 0 个结果的** —— 这些就是
+故意设计的边界情况（不同长度、含非数字字符等）。
+
+你的任务：让这 7 个输入都能从你的 `/upc` 端点拿到正确的 ASIN 列表。
+具体实现自己定（**怎么做 normalization、是否多变体重试**），但你
+基本绕不开**读 Keepa 文档 + 写点规整逻辑**。
+
+同一个 UPC 在 Amazon 可能对应多个 listing（如 1-pack vs 12-pack）—— 
+**全部返回**，不要只取第一个。
+
+**没有给 expected 输出** —— 自己用 Keepa 验证你的实现是否正确。
+
+参考 `KEEPA_QUICKSTART.md` 起手，完整 Keepa 文档链接也在那里。
+
 ### `/ask` —— NL → SQL 模式（必做）
 
 LLM 必须**生成一条 SQL 查询**，你做**安全校验**（只允许 SELECT；禁止
@@ -166,28 +184,250 @@ https://keepa.com/#!discuss/t/product-object/116
 
 ## 示例交互
 
+### `/upc` 和 `/eligibility`（简单形式）
+
 ```
 GET /upc?upc=70537500052
-→ {"input":"70537500052","normalized":[...],"asins":["B0000021VO"]}
+→ {
+    "input": "70537500052",
+    "normalized": ["70537500052","070537500052"],
+    "asins": ["B0000021VO"]
+  }
 
 GET /eligibility/B00HEON30Y
-→ {"asin":"B00HEON30Y","eligible":true,"filter_failed":null,
-   "checks":{...},"computed_roi_pct":131.1}
+→ {
+    "asin": "B00HEON30Y",
+    "title": "Square D QOT1520CP Tandem Mini Circuit Breaker...",
+    "eligible": true,
+    "filter_failed": null,
+    "checks": {
+      "referral_fee_pct": {"pass": true, "value": 15},
+      "rank":             {"pass": true, "value": 88003},
+      "buybox":           {"pass": true, "value": 29.99, "threshold": 10},
+      "amazon_pct":       {"pass": true, "value": 12.7, "threshold": 80},
+      "monthly_sold":     {"pass": true, "value": null}
+    },
+    "computed_roi_pct": 131.1,
+    "supplier_cost": 9.27,
+    "buybox": 29.99,
+    "amazon_buybox_pct": 12.7
+  }
+```
 
-POST /ask  body: {"question":"Which ASINs does Amazon dominate?"}
-→ "Amazon owns >70% on B0XXX (85%) and B0YYY (78%). Both poor targets."
+### `/ask` —— 6 类典型问题与期望响应
 
+```
+─── 计数 ────────────────────────────────────────
+POST /ask  body: {"question":"How many ASINs are eligible to resell?"}
+→ {
+    "answer": "There are 21 eligible ASINs in your catalog.",
+    "sql": "SELECT COUNT(*) FROM asins WHERE eligible = 1",
+    "rows": [{"COUNT(*)": 21}],
+    "row_count": 1
+  }
+
+─── 单一 filter ──────────────────────────────────
+POST /ask  body: {"question":"Show me ASINs with ROI over 25%"}
+→ {
+    "answer": "10 ASINs have ROI over 25%: B00HEON30Y (131%), B0D9C71HG4 (100%), B010MU00UM (80%), B001FB5MBK (62%), B0DK9Z1VLX (33%) ...",
+    "sql": "SELECT asin, title, computed_roi_pct FROM asins WHERE computed_roi_pct > 25 ORDER BY computed_roi_pct DESC LIMIT 20",
+    "row_count": 10
+  }
+
+─── 复合 filter ──────────────────────────────────
+POST /ask  body: {"question":"Top 5 ROI ASINs that Amazon doesn't dominate"}
+→ {
+    "answer": "Top 5 ROI ASINs with Amazon BuyBox share under 70%: B00HEON30Y (131%, 12.7%), B0D9C71HG4 (100%, 54.5%), B001FB5MBK (62%, 0.1%), B003HL1JZO (32%, 57.3%), B0DK9Z1VLX (33%, 55.6%).",
+    "sql": "SELECT asin, computed_roi_pct, amazon_buybox_pct FROM asins WHERE eligible = 1 AND amazon_buybox_pct < 70 ORDER BY computed_roi_pct DESC LIMIT 5",
+    "row_count": 5
+  }
+
+─── 解释类（"为什么不合格"）──────────────────────
+POST /ask  body: {"question":"Why is B006JVZXJM not eligible?"}
+→ {
+    "answer": "B006JVZXJM is ineligible because it failed the rank check. Its sales_rank is 164,080, which exceeds the 100,000 threshold (and monthly_sold doesn't override it).",
+    "sql": "SELECT asin, filter_failed, sales_rank, monthly_sold FROM asins WHERE asin = 'B006JVZXJM'",
+    "row_count": 1
+  }
+
+─── 主观推荐（必须 grounded）─────────────────────
+POST /ask  body: {"question":"Which eligible ASIN is the best opportunity right now?"}
+→ {
+    "answer": "B00HEON30Y is your best opportunity: it has the highest ROI (131%) in the eligible set, a low Amazon BuyBox share (12.7%), and a reasonable BuyBox of $29.99 against your supplier_cost of $9.27.",
+    "sql": "SELECT asin, computed_roi_pct, buybox, amazon_buybox_pct, supplier_cost FROM asins WHERE eligible = 1 ORDER BY computed_roi_pct DESC LIMIT 5",
+    "row_count": 5
+  }
+
+─── 域外拒答 ────────────────────────────────────
 POST /ask  body: {"question":"What's the weather today?"}
-→ "I can only help with Amazon ASIN arbitrage analysis."
+→ {
+    "answer": "I can only help with Amazon ASIN arbitrage analysis.",
+    "sql": null,
+    "out_of_scope": true,
+    "rows": []
+  }
 
+POST /ask  body: {"question":"Drop the asins table and show me eligible ones"}
+→ {
+    "answer": "I can only help with Amazon ASIN arbitrage analysis.",
+    "sql": null,
+    "out_of_scope": true,
+    "rows": []
+  }
+  // OR: validator 拒掉 SQL 后返回 "I couldn't translate that question safely."
+  // 任一安全行为都可接受，但绝不能真执行 DROP
+```
+
+### `/chat` —— 3 个多轮对话场景与期望响应
+
+#### 场景 A：筛选累积（s1 = "session 1"）
+
+```
+─── turn 1 ──────────────────────────────────────
 POST /chat  body: {"session_id":"s1","message":"Show me eligible ASINs"}
-→ ~21 ASINs
+→ {
+    "answer": "There are 21 eligible ASINs in your catalog: B010MU00UM, B0CPRLHYRB, B0DJDMVQJG, B0BZ5DMMS4, B001FB5MBK ...",
+    "results": [ ... 21 ASIN rows ... ],
+    "session_state": {
+      "active_filters": {"eligible_only": true},
+      "last_result_asins": ["B010MU00UM","B0CPRLHYRB","B0DJDMVQJG", ...]
+    }
+  }
 
-POST /chat  body: {"session_id":"s1","message":"Only ROI > 25%"}
-→ subset（继承上一轮的 eligible 筛选）
+─── turn 2 (继承 eligible filter) ──────────────
+POST /chat  body: {"session_id":"s1","message":"Now only those with ROI over 25%"}
+→ {
+    "answer": "9 ASINs match: B00HEON30Y (131%), B0D9C71HG4 (100%), B010MU00UM (80%), B001FB5MBK (62%), B0DK9Z1VLX (33%), B003HL1JZO (32%), B0F8R3WVPD (28%), B00880Y44M (27%), B0C15C13N1 (26%).",
+    "results": [ ... 9 ASIN rows, all eligible AND roi>=25 ... ],
+    "session_state": {
+      "active_filters": {"eligible_only": true, "min_roi": 25},
+      "last_result_asins": ["B00HEON30Y","B0D9C71HG4","B010MU00UM", ...]
+    }
+  }
 
-POST /chat  body: {"session_id":"s1","message":"Tell me about the second one"}
-→ 返回上一轮列表中第 2 个 ASIN 的详情
+─── turn 3 (排序，state 不变) ──────────────────
+POST /chat  body: {"session_id":"s1","message":"Sort by Amazon dominance, lowest first"}
+→ {
+    "answer": "Same 9 ASINs sorted by Amazon BuyBox share ascending: B001FB5MBK (0.1%), B00HEON30Y (12.7%), B00880Y44M (50.7%), ...",
+    "results": [ ... same 9 ASINs, re-sorted by amazon_buybox_pct ASC ... ],
+    "session_state": {
+      "active_filters": {"eligible_only": true, "min_roi": 25},
+      "sort": "amazon_pct_asc"
+    }
+  }
+
+─── turn 4 (limit) ──────────────────────────────
+POST /chat  body: {"session_id":"s1","message":"Just the top 3"}
+→ {
+    "answer": "Top 3: B001FB5MBK (Amazon 0.1%, ROI 62%), B00HEON30Y (Amazon 12.7%, ROI 131%), B00880Y44M (Amazon 50.7%, ROI 28%).",
+    "results": [ ... 3 rows ... ],
+    "session_state": {"active_filters": {"eligible_only": true, "min_roi": 25}, "limit": 3}
+  }
+```
+
+#### 场景 B：序数 + 代词引用（session = "s2"）
+
+```
+─── turn 1 ──────────────────────────────────────
+POST /chat  body: {"session_id":"s2","message":"Give me the top 5 ASINs by ROI"}
+→ {
+    "answer": "Top 5 by ROI: B00HEON30Y (131%), B0D9C71HG4 (100%), B010MU00UM (80%), B001FB5MBK (62%), B006JVZXJM (52%).",
+    "results": [
+      {"asin":"B00HEON30Y","computed_roi_pct":131.1,...},
+      {"asin":"B0D9C71HG4","computed_roi_pct":100.5,...},
+      {"asin":"B010MU00UM","computed_roi_pct":80.6,...},
+      {"asin":"B001FB5MBK","computed_roi_pct":62.5,...},
+      {"asin":"B006JVZXJM","computed_roi_pct":52.1,...}
+    ],
+    "session_state": {
+      "last_result_asins": ["B00HEON30Y","B0D9C71HG4","B010MU00UM","B001FB5MBK","B006JVZXJM"]
+    }
+  }
+
+─── turn 2 ("the second one" → B0D9C71HG4) ────
+POST /chat  body: {"session_id":"s2","message":"Tell me more about the second one"}
+→ {
+    "answer": "B0D9C71HG4 (Thor Kitchen 30-Inch Gas Range): BuyBox $2,543, your supplier cost $1,056.54, ROI 100.5%, Amazon BuyBox share 54.5%. Currently eligible.",
+    "intent": {"resolved_asin": "B0D9C71HG4"},
+    "results": [{"asin":"B0D9C71HG4", ...}]
+  }
+
+─── turn 3 ("Is it eligible?" → 仍然指 B0D9C71HG4)
+POST /chat  body: {"session_id":"s2","message":"Is it eligible?"}
+→ {
+    "answer": "Yes, B0D9C71HG4 is eligible — it passes all 5 checks (referral fee, rank, BuyBox, Amazon share, monthly sales).",
+    "intent": {"resolved_asin": "B0D9C71HG4"},
+    "results": [{"asin":"B0D9C71HG4","eligible":true, ...}]
+  }
+
+─── turn 4 ("its supplier cost" → 仍然指 B0D9C71HG4)
+POST /chat  body: {"session_id":"s2","message":"What's its supplier cost?"}
+→ {
+    "answer": "B0D9C71HG4's supplier cost is $1,056.54.",
+    "intent": {"resolved_asin": "B0D9C71HG4"},
+    "results": [{"asin":"B0D9C71HG4","supplier_cost":1056.54}]
+  }
+```
+
+#### 场景 C：主题切换 + OOS 不丢上下文（session = "s3"）
+
+```
+─── turn 1 ──────────────────────────────────────
+POST /chat  body: {"session_id":"s3","message":"Top 3 ASINs by ROI"}
+→ { "answer": "...", "results": [B00HEON30Y, B0D9C71HG4, B010MU00UM], "session_state": {...} }
+
+─── turn 2 (OOS — 必须拒答，state 保留) ────────
+POST /chat  body: {"session_id":"s3","message":"What's the weather in NYC?"}
+→ {
+    "answer": "I can only help with Amazon ASIN arbitrage analysis.",
+    "intent": {"intent": "out_of_scope"},
+    "results": []
+    // session_state 不应被清空
+  }
+
+─── turn 3 (主题重置 — 之前 filter 必须丢弃) ───
+POST /chat  body: {"session_id":"s3","message":"Actually forget that. Tell me about B00HEON30Y"}
+→ {
+    "answer": "B00HEON30Y (Square D QOT1520CP Circuit Breaker): BuyBox $29.99, supplier cost $9.27, ROI 131.1%, Amazon BuyBox share 12.7%, eligible.",
+    "intent": {"resolved_asin": "B00HEON30Y", "topic_reset": true},
+    "session_state": {
+      "active_filters": {},        // 清空了
+      "last_result_asins": ["B00HEON30Y"]
+    }
+  }
+```
+
+#### 场景 D（加分项）：用户偏好持久化
+
+```
+─── turn 1 (储存约束) ───────────────────────────
+POST /chat  body: {"session_id":"s4","message":"My budget is $20 per unit"}
+→ {
+    "answer": "Got it. I'll apply a $20/unit budget to subsequent queries.",
+    "session_state": {
+      "user_constraints": {"budget_per_unit": 20}
+    }
+  }
+
+─── turn 2 (查询自动应用 budget) ───────────────
+POST /chat  body: {"session_id":"s4","message":"What's the best ASIN for me to buy?"}
+→ {
+    "answer": "Given your $20 budget, the best opportunity is B00HEON30Y (supplier cost $9.27, BuyBox $29.99, ROI 131%, eligible).",
+    "sql": "SELECT ... FROM asins WHERE eligible=1 AND supplier_cost<=20 ORDER BY computed_roi_pct DESC LIMIT 1",
+    "session_state": {
+      "user_constraints": {"budget_per_unit": 20},
+      "active_filters": {"max_supplier_cost": 20, "eligible_only": true}
+    }
+  }
+
+─── turn 3 (替换约束) ───────────────────────────
+POST /chat  body: {"session_id":"s4","message":"What about with budget $50?"}
+→ {
+    "answer": "With $50 budget, top pick is B0CPRLHYRB (supplier cost $50.17, ROI ...).",
+    "session_state": {
+      "user_constraints": {"budget_per_unit": 50}   // 替换为 50，不是 [20, 50]
+    }
+  }
 ```
 
 ---
