@@ -1,0 +1,14 @@
+# 参考 docker-compose —— 改成你自己的实现后重命名为 docker-compose.yml。
+# SQLite 版本（最简）。如果你用 Postgres，自己加 db 服务。
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                           # 从 env.example 复制过来的
+    volumes:
+      - ./data:/app/data               # 持久化 SQLite + 输入 CSV
+    environment:
+      DB_PATH: /app/data/scout.db

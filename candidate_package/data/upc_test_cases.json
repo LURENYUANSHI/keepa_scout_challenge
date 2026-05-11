@@ -1,0 +1,53 @@
+{
+  "_note": "这些是会被发到你的 /upc 端点的 UPC 输入。**不提供 expected ASIN 输出** —— 用每个原始输入以及你自己规整出的变体直接打 Keepa 验证。某些输入是故意设的边界 case，原样发不会成功。",
+  "_difficulty_legend": {
+    "trivial": "不做任何预处理也能跑通",
+    "easy": "需要基本的输入清洗",
+    "medium": "需要格式感知的处理",
+    "hard": "加分项 —— 需要不常见的转换；不强制通过"
+  },
+  "cases": [
+    {
+      "id": "case_01",
+      "input_upc": "070537500052",
+      "difficulty": "trivial",
+      "required": true
+    },
+    {
+      "id": "case_02",
+      "input_upc": "70537500052",
+      "difficulty": "easy",
+      "required": true
+    },
+    {
+      "id": "case_03",
+      "input_upc": "9780545465298",
+      "difficulty": "medium",
+      "required": true
+    },
+    {
+      "id": "case_04",
+      "input_upc": "00000772041997",
+      "difficulty": "hard",
+      "required": false
+    },
+    {
+      "id": "case_05",
+      "input_upc": "052144100245",
+      "difficulty": "medium",
+      "required": true
+    },
+    {
+      "id": "case_06",
+      "input_upc": "999999999999",
+      "difficulty": "easy",
+      "required": false
+    },
+    {
+      "id": "case_07",
+      "input_upc": "070-537-500-052",
+      "difficulty": "easy",
+      "required": false
+    }
+  ]
+}

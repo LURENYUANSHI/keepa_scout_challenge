@@ -1,0 +1,20 @@
+# 参考 Dockerfile —— 改成你自己的实现后重命名为 Dockerfile。
+# 用 python:3.11-slim 是个合理起点，你也可以换。
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制源码 + 数据
+COPY app ./app
+COPY data ./data
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+
+# 启动时先跑 ETL（填 DB），再起服务
+CMD ["sh", "-c", "python -m app.etl && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

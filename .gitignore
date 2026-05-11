@@ -1,0 +1,40 @@
+# ── Internal-only — never push these ──
+internal/
+candidate_simulation/.venv/
+candidate_simulation/data/*.db*
+*.env
+.env
+.env.local
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── DB / state ──
+*.db
+*.db-shm
+*.db-wal
+data/scout.db*
+
+# ── OS / IDE ──
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ── Logs ──
+*.log
+/tmp/
+
+# ── Allowed exceptions ──
+!candidate_package/data/sample_asins.csv
+!candidate_package/data/upc_test_cases.json
