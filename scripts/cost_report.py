@@ -18,6 +18,7 @@ and should still print even if Keepa is down.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import subprocess
@@ -120,7 +121,14 @@ def _keepa_token_status(api_key: str) -> dict:
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return {"ok": True, "body": json.loads(resp.read().decode("utf-8"))}
+            raw = resp.read()
+            # Keepa gzips essentially every response regardless of
+            # Accept-Encoding, and urllib does NOT auto-decompress — the
+            # 0x8b in the old "'utf-8' codec can't decode byte 0x8b" error
+            # was the gzip magic number, i.e. Keepa WAS reachable.
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            return {"ok": True, "body": json.loads(raw.decode("utf-8"))}
     except urllib.error.HTTPError as exc:
         return {"ok": False, "error": f"HTTP {exc.code}: {exc.read().decode('utf-8', 'replace')}"}
     except urllib.error.URLError as exc:

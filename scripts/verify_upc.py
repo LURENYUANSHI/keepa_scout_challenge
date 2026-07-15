@@ -35,6 +35,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 UPC_CASES_PATH = REPO_ROOT / "data" / "upc_test_cases.json"
 
+# case_06's all-9s input is the deliberately-fake barcode in
+# data/upc_test_cases.json — no such product exists, so the CORRECT /upc
+# behavior for it is an empty asins list. Without this, a correct empty
+# result was graded FAIL and (via the any-FAIL exit path) failed the whole
+# verify_all.sh run.
+EXPECTED_EMPTY_INPUTS = {"999999999999"}
+
 
 def _http(method: str, path: str, *, token: str | None = None, body: dict | None = None,
           timeout: float = 60.0) -> tuple[int, dict | str]:
@@ -111,7 +118,12 @@ def main() -> int:
         else:
             assert isinstance(body, dict)
             asins = body.get("asins") or []
-            outcome = "PASS" if asins else "FAIL"
+            if upc in EXPECTED_EMPTY_INPUTS:
+                # The designed-fake barcode: the CORRECT behavior is an
+                # empty list; finding "matches" for it would be the bug.
+                outcome = "PASS" if not asins else "FAIL"
+            else:
+                outcome = "PASS" if asins else "FAIL"
             detail = f"normalized={body.get('normalized')}"
 
         results.append(
