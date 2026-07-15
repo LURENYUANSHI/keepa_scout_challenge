@@ -28,7 +28,6 @@ async function lookup() {
 
 <template>
   <div>
-    <p class="eyebrow">02 — Barcode resolver</p>
     <h1>UPC → ASIN</h1>
 
     <section class="panel">

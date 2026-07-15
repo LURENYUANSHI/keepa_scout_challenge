@@ -74,7 +74,6 @@ onUnmounted(() => {
 
 <template>
   <div>
-    <p class="eyebrow">03 — Full catalog resync</p>
     <h1>Refresh</h1>
 
     <section class="panel">

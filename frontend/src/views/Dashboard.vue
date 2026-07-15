@@ -110,7 +110,6 @@ function fmtCheckValue(v) {
 
 <template>
   <div>
-    <p class="eyebrow">01 — Eligibility &amp; ROI</p>
     <h1>ASIN lookup</h1>
 
     <div class="mode-toggle" role="tablist">
