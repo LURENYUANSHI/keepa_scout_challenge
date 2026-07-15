@@ -158,10 +158,21 @@ function selectSession(session) {
   router.push({ name: 'chat', params: { sessionId: session.session_id } })
 }
 
-const hasActiveFilters = computed(() => {
-  const filters = sessionState.value.active_filters
-  return Boolean(filters && Object.keys(filters).length)
+// `active_filters` always carries backend defaults (sort/limit) even when
+// the user never asked to filter — hide those so the panel only appears
+// for filters the user actually set.
+const DEFAULT_FILTER_KEYS = new Set(['sort', 'limit'])
+
+const displayFilters = computed(() => {
+  const filters = sessionState.value.active_filters || {}
+  return Object.fromEntries(
+    Object.entries(filters).filter(([key]) => !DEFAULT_FILTER_KEYS.has(key)),
+  )
 })
+
+const hasActiveFilters = computed(() =>
+  Boolean(Object.keys(displayFilters.value).length || sessionState.value.resolved_entity),
+)
 
 // Auto-follow: stay pinned to the bottom while deltas stream in, but the
 // moment the user scrolls up to re-read something, stop yanking them back
@@ -462,7 +473,7 @@ function startNewChat() {
       <details v-if="hasActiveFilters" class="panel filters-disclosure">
         <summary>Active filters &amp; state</summary>
         <div class="tag-row" style="margin-top: var(--space-3)">
-          <span v-for="(value, key) in sessionState.active_filters" :key="key" class="chip" style="cursor: default">
+          <span v-for="(value, key) in displayFilters" :key="key" class="chip" style="cursor: default">
             {{ key }}: {{ value }}
           </span>
           <span v-if="sessionState.resolved_entity" class="chip" style="cursor: default">
