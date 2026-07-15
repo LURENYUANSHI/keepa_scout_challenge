@@ -1,53 +1,67 @@
 # TIMELINE
 
-单次连续的 Claude Code（多子 agent 编排）会话，2026-07-15，UTC 时间。人类（我）负责方向判断
-和验收；AI（Claude Code 主控 + 子 agent）负责具体实现，见 `REPORT.md`"AI 工具坦白"。
+单次连续的 Claude Code（多子 agent 编排）会话，2026-07-15，**UTC+8**（本机本地时区）。时间点
+锚定方式：`candidate_package/test_evidence/*/` 里每份证据文件的真实写入时间戳（未被后续操作
+覆盖，比数据库里的 `snapshot_at` 可靠——`asins.snapshot_at` 是 upsert 语义，后面跑真实 ETL
+会覆盖掉早期合成数据的时间戳，之前那版 TIMELINE.md 就是被这个坑绕进去了，重新核对时发现的）。
+人类（我）负责方向判断和验收；AI（Claude Code 主控 + 子 agent）负责具体实现，见
+`REPORT.md`"AI 工具坦白"。
 
 ```
-07-15 02:00-02:20  读 CHALLENGE.md / KEEPA_QUICKSTART.md。
-                    人类：明确任务范围。AI：无。
+07-15 11:55-12:00  会话开始，先处理了一个不相关的前置请求（迁移 .claude 工作区配置到本项目），
+                    不计入本挑战工时。
+                    人类：提出迁移请求。AI：执行迁移。
 
-07-15 02:20-03:10  技术选型讨论——DB(SQLite vs Postgres)/后台任务(BackgroundTasks vs Celery)。
-                    人类：否决"demo 小所以用 SQLite"的思路，要求按目标规模设计，定 Postgres+Celery。
-                    AI：给选项对比，写进 ARCHITECTURE.md。
+07-15 12:00-13:21  读 CHALLENGE.md/KEEPA_QUICKSTART.md。技术选型讨论——DB(Postgres)/后台任务
+                    (Celery)/强制鉴权/会话记忆架构，调研 LangGraph checkpointer/store 并发现
+                    工具调用记录会丢的设计漏洞。写 ARCHITECTURE.md + HARNESS.md（两份文档
+                    13:21 写完）。
+                    人类：否决"demo 小用 SQLite"的思路；要求强制鉴权不做 hedge；指出工具调用
+                    要包装成真正的 tool call；定"禁止 AI 味"的前端黑名单。
+                    AI：给选项对比、调研 LangGraph 文档、写设计文档全文。
 
-07-15 03:10-03:40  鉴权模型讨论——邮箱+密码注册登录，强制鉴权、不做匿名回退。
-                    人类：拒绝我提议的"可选鉴权兼容题目示例"方案，要求强制且不hedge。
-                    AI：设计 users/auth_tokens schema，画时序图。
+07-15 13:21-13:31  项目结构定稿(ARCHITECTURE.md §5)，准备拆解成可并行的实现阶段。
+                    人类：确认可以开始实现。AI：拆任务、准备子 agent 简报。
 
-07-15 03:40-04:30  会话记忆架构——短期(session)/长期(user偏好)分层，调研 LangGraph
-                    checkpointer/store，发现工具调用记录会丢的设计漏洞并纠正。
-                    人类：指出工具调用要包装成真正的 tool call，否则消息记录丢失。
-                    AI：调研 LangGraph 文档，重设计 ER 图和 /chat 时序图。
+07-15 13:31-13:41  Phase 1(后端骨架) -> Phase 2a(鉴权)+2b(Keepa客户端/eligibility规则，并行)。
+                    人类：独立复核（真实 docker compose up、真实 curl、真实 psql 查询），不
+                    只信 agent 自述。
+                    AI：三个子 agent 实现 + 自测。
 
-07-15 04:30-05:00  HARNESS.md（目标/验收标准/证据）+ 前端质量红线（禁止 AI 味的黑名单、
-                    WS 流式渲染的坑）+ 项目目录结构定稿。
-                    人类：定"禁止 AI 味"的具体黑名单、点出流式渲染的常见坑。
-                    AI：写 HARNESS.md 全文。
+07-15 13:41-14:06  Phase 3a：ETL + /upc + /eligibility 端点。发现开发环境连不上 Keepa
+                    （DNS 解析到网络测试哨兵地址），决定灌合成 fixture 数据继续开发。
+                    人类：验收，处理 Keepa 网络问题，决定用合成数据的方案。
+                    AI：实现 + 自测；我独立复核 + 写验证证据。
 
-07-15 05:00-06:20  Phase 1-3：后端骨架(models/config/docker) -> 鉴权 + Keepa 客户端/
-                    eligibility 规则(并行) -> ETL/upc/eligibility 端点 -> Celery/refresh/
-                    每日定时刷新。每阶段子 agent 实现，我独立复核(真实 docker compose up、
-                    真实 curl、真实 psql 查询)，不只信 agent 自述。
-                    人类：验收，发现并处理 Keepa 网络不通的问题，决定用合成数据继续开发。
-                    AI：实现 + 自测；我独立复核 + 写验证证据到 test_evidence/。
+07-15 14:06-14:30  Phase 3b：Celery + /refresh 断点续跑 + 每日定时刷新。发现并修复计数越界
+                    bug（done+failed 曾超过 total）。
+                    人类：验收真实 kill/restart 场景。
+                    AI：实现 + 真实 kill/restart 测试 + 修 bug。
 
-07-15 06:20-07:40  Phase 4：LangGraph agent(6个工具/checkpointer/store) + /ask + /chat +
-                    WS 流式端点。发现并修复 /ask 的 prompt 问题(见 REPORT.md 的 prompt 迭代)。
-                    人类：定 LLM 供应商(DeepSeek)，提醒 WS 流式需求，验收真实多轮对话。
-                    AI：实现 + 修 2 个真实 prompt bug；我用真实 curl 跑通场景 A/B，查
-                    checkpoint 表确认工具调用持久化。
+07-15 14:30-15:38  Phase 4：LangGraph agent(6个工具/checkpointer/store) + /ask + /chat +
+                    WS 流式端点。发现并修复 2 个真实 prompt bug（/ask 对具体 ASIN 解释类问题
+                    和主观推荐类问题错误地跳过 SQL 查询）。
+                    人类：定 LLM 供应商(DeepSeek)，提醒 WS 流式需求，用真实 curl 验收多轮场景，
+                    读了失败 case 后亲自改了两版 prompt。
+                    AI：实现 + 自测；我查 checkpoint 表确认工具调用持久化。
 
-07-15 07:40-08:20  Phase 5-6：Vue 前端(骨架+auth+数据页 -> chat 流式 UI 两波) + 验收脚本
-                    (verify_auth/upc/chat/refresh_resume/cost_report/verify_all)。
-                    发现并修复 refresh 断点续跑的计数越界 bug(done+failed 超过 total)。
-                    人类：验收 chrome-devtools 截图，处理并行 agent 之间的 docker 容器争用。
-                    AI：实现 + 真实 kill/restart 测试；我独立复核截图和 pytest。
+07-15 15:38-16:43  Phase 5(前端骨架+auth+数据页 -> chat流式UI两波 -> 对齐公司品牌重做视觉) +
+                    Phase 6(验收脚本，含真实 docker compose kill/restart)，两个并行推进。
+                    并行 agent 之间发生过 docker 容器争用（一个 agent 遗留的后台进程在反复重启
+                    api/worker，跟我自己的手动验证撞车），排查后确认不是代码 bug。
+                    人类：验收 chrome-devtools 截图，给出公司官网做视觉参考，排查容器争用。
+                    AI：实现 + 真实浏览器测试 + 真实 kill/restart 测试。
 
-07-15 08:20-08:50  发现设计风格与目标公司(Supersonic Supply)品牌不符，重做前端视觉
-                    (白底/藏青/电光蓝/几何无衬线，替换原先的复古清单风)，只改样式不动逻辑。
-                    人类：给出公司官网参考，要求对齐品牌。AI：restyle + 截图复核。
+07-15 16:43-17:11  收尾：README.md/REPORT.md/TIMELINE.md 撰写，git 分批提交(9次，按功能模块)
+                    并 fork 推送。开发环境网络意外恢复，补跑真实 python -m app.etl(32/32成功，
+                    消耗97个Keepa token)、真实 POST /refresh(32/32成功)、真实浏览器端到端走查
+                    (含真实价格异常检测)，更新文档里的真实数字。
+                    人类：确认提交方式(fork推送)，验证网络诊断细节。
+                    AI：起草文档、提交、真实数据验证。
 
-07-15 08:50-09:20  收尾：README.md/REPORT.md/TIMELINE.md 撰写，成本核算脚本产出核对。
-                    人类：审阅交付物内容是否如实。AI：起草三份文档。
+07-15 17:11-       进行中：发现 /chat 的最终回答文本不是真正的 token 级流式输出（工具调用是
+                    增量推送的，但答案文字是生成完一次性推送），修复中；随后计划把前端组件库
+                    换成 PrimeVue。
+                    人类：实测发现流式问题，定优先级(先修流式再换UI库)，选定 PrimeVue。
+                    AI：诊断 + 修复中。
 ```
