@@ -246,10 +246,14 @@ def test_messages_replays_tool_call_card_with_result(sessions_client):
     assert "rows" in tool_entry["result"]
 
     # A user bubble precedes the tool card, and a final answer follows it.
+    # A pre-tool answer segment (the model writing the first part of its
+    # answer before the tool call) may ALSO appear before the tool card --
+    # _replay_messages replays it -- so compare against the LAST answer.
     types = [m["type"] for m in history]
     assert types[0] == "user"
     assert "answer" in types
-    assert types.index("tool") < types.index("answer")
+    last_answer_idx = len(types) - 1 - types[::-1].index("answer")
+    assert types.index("tool") < last_answer_idx
 
 
 def test_messages_two_turns_appends_after_replayed_history(sessions_client):

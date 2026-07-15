@@ -29,37 +29,24 @@ frontend one at a time, not batched until the whole turn finishes):
           `event_sink` hook) -- not held back until every tool call in
           the turn has finished.
     {"type": "answer_delta", "content": "<chunk text>"}
-        ^ zero or more, one per token/token-chunk of the final natural-
-          language answer, emitted the moment app/agent/graph.py's
-          `agent_node` streams them from the LLM (see
-          `_stream_agent_response`) -- NOT held back until generation
-          finishes. Meant to only ever be the user-facing final answer, not
-          an intermediate tool-call-selection turn -- but see
-          `answer_retract` below for the one case that isn't guaranteed.
-    {"type": "answer_done"}                          (end of a real answer
-                                                       stream -- tells the
-                                                       client to stop
-                                                       appending further
-                                                       deltas into that
-                                                       bubble and do any
-                                                       final render)
-    {"type": "answer_retract"}                       (rare: some
-                                                       answer_delta events
-                                                       were already sent for
-                                                       what turned out to
-                                                       actually be a
-                                                       tool-call turn, not
-                                                       the final answer --
-                                                       SYSTEM_PROMPT tells
-                                                       the model not to
-                                                       narrate before
-                                                       calling a tool, but a
-                                                       real run showed it
-                                                       doing so anyway
-                                                       sometimes; the client
-                                                       must discard that
-                                                       bubble entirely, not
-                                                       finalize it)
+        ^ zero or more, one per token/token-chunk of user-facing answer
+          text, emitted the moment app/agent/graph.py's `agent_node`
+          streams them from the LLM (see `_stream_agent_response`) -- NOT
+          held back until generation finishes.
+    {"type": "answer_done"}                          (closes the current
+                                                       answer bubble --
+                                                       stop appending
+                                                       deltas into it)
+        ^ a single turn can carry MORE than one delta-run + answer_done
+          pair: the model sometimes writes the first segment of its answer
+          BEFORE its tool calls (e.g. the explanation half of a mixed
+          "explain X, then fetch Y" question -- observed live, see
+          `_stream_agent_response`). Each segment is finalized with its own
+          answer_done, and the tool_call events for that round arrive
+          between segments; the post-tool segment does not repeat the
+          pre-tool one. (An earlier protocol revision instead sent
+          `answer_retract` to delete the pre-tool bubble -- that threw away
+          real answer content and no longer exists.)
     {"type": "session_state", "state": {...}}          (once, end of turn;
                                                          same shape as
                                                          POST /chat's
@@ -91,7 +78,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.graph import extract_results, last_ai_text
+from app.agent.graph import extract_results, turn_answer_text
 from app.agent.usage import TokenUsageCollector, log_usage
 from app.auth.dependencies import get_current_user, get_user_by_token
 from app.config import settings
@@ -188,7 +175,7 @@ async def chat(
         {"messages": [HumanMessage(content=body.message)]}, config=config
     )
 
-    answer = last_ai_text(result_state["messages"])
+    answer = turn_answer_text(result_state["messages"])
     results = extract_results(result_state["messages"])
     session_state = _session_state(result_state)
 
@@ -301,14 +288,11 @@ async def _run_streaming_turn(
                 break
             item_type = item.get("type")
             if item_type == "answer_done":
-                # Only a real, completed answer stream counts -- NOT a mere
-                # answer_delta, since a run of deltas can still end in an
-                # answer_retract (app/agent/graph.py's
-                # `_stream_agent_response`: the model narrated before an
-                # eventual tool call) rather than an answer_done.
+                # Any finalized answer segment counts (a turn can have more
+                # than one -- see the module docstring's answer_done note);
+                # once one exists, the whole-answer fallback below must not
+                # fire and duplicate it.
                 answer_streamed = True
-            elif item_type == "answer_retract":
-                answer_streamed = False
             await _send_json(websocket, item)
     finally:
         if not task.done():
@@ -339,7 +323,7 @@ async def _run_streaming_turn(
         # graph on an AIMessage that still has tool_calls set), fall back to
         # sending whatever text is there in one shot rather than silently
         # dropping it.
-        answer = last_ai_text(result_state["messages"])
+        answer = turn_answer_text(result_state["messages"])
         if answer:
             await _send_json(websocket, {"type": "answer_delta", "content": answer})
             await _send_json(websocket, {"type": "answer_done"})
@@ -417,8 +401,8 @@ async def chat_stream(
 
 def _text_content(content: Any) -> str:
     """Best-effort plain text out of a LangChain message's `.content` --
-    mirrors app/agent/graph.py's `last_ai_text`/`_chunk_text` handling of
-    the same "usually a str, sometimes a list of content blocks"
+    mirrors app/agent/graph.py's `_chunk_text` handling of the same
+    "usually a str, sometimes a list of content blocks"
     provider-dependent shape."""
     if isinstance(content, str):
         return content
@@ -445,14 +429,14 @@ def _replay_messages(messages: list[Any]) -> list[dict[str, Any]]:
     nothing to filter there, but a stray one is skipped defensively rather
     than crashing this endpoint.
 
-    A tool-calling AIMessage's own `.content` (the occasional narration text
-    the model produces despite SYSTEM_PROMPT telling it not to -- see
-    graph.py's `_stream_agent_response` docstring) is intentionally NOT
-    replayed as an `answer` bubble: on the live path that exact text either
-    never streamed at all (system prompt worked that turn) or got sent as
-    `answer_delta`s and then discarded via `answer_retract` (system prompt
-    didn't) -- either way it was never meant to persist as a visible
-    message, so replay shouldn't resurrect it. Each tool_call becomes its
+    A tool-calling AIMessage's own `.content` IS replayed, as an `answer`
+    bubble placed before that message's tool cards: on the live path that
+    text streamed as `answer_delta`s and was finalized with an
+    `answer_done` when the tool calls surfaced (see graph.py's
+    `_stream_agent_response` -- it's the pre-tool segment of the answer,
+    e.g. the explanation half of a mixed question, and the post-tool round
+    doesn't repeat it), so replay must show it too or the restored
+    transcript is missing half the answer. Each tool_call becomes its
     own `type: "tool"` entry (`status: "done"` -- this is history, nothing
     is still running), matched to its result by `tool_call_id` rather than
     list position, since parallel tool calls don't guarantee the following
@@ -469,6 +453,12 @@ def _replay_messages(messages: list[Any]) -> list[dict[str, Any]]:
         elif isinstance(message, AIMessage):
             tool_calls = getattr(message, "tool_calls", None) or []
             if tool_calls:
+                pre_tool_text = _text_content(message.content)
+                if pre_tool_text.strip():
+                    seq += 1
+                    out.append(
+                        {"id": f"h{seq}", "type": "answer", "content": pre_tool_text, "streaming": False}
+                    )
                 for call in tool_calls:
                     seq += 1
                     entry = {

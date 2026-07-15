@@ -172,15 +172,17 @@ def test_ws_stream_emits_tool_events_then_streamed_answer_then_session_state(ws_
     assert "session_state" in types
 
     # Ordering: each tool_call_start precedes its matching tool_call_result,
-    # and both precede the streamed answer, which precedes session_state
+    # and both precede the FINAL answer segment, which precedes session_state
     # (HARNESS.md §10.3 -- events must arrive one at a time, not all dumped
-    # together at the end).
+    # together at the end). A pre-tool answer segment (deltas + answer_done
+    # BEFORE the tool events) is legitimate under the segment protocol --
+    # the model may write the first part of its answer before its tool call
+    # -- so only the LAST answer_done is required to follow the tool events.
     start_idx = types.index("tool_call_start")
     result_idx = types.index("tool_call_result")
-    first_delta_idx = types.index("answer_delta")
-    done_idx = types.index("answer_done")
+    last_done_idx = len(types) - 1 - types[::-1].index("answer_done")
     state_idx = types.index("session_state")
-    assert start_idx < result_idx < first_delta_idx < done_idx < state_idx
+    assert start_idx < result_idx < last_done_idx < state_idx
 
     tool_call_start = events[start_idx]
     assert tool_call_start["tool"]
@@ -190,10 +192,9 @@ def test_ws_stream_emits_tool_events_then_streamed_answer_then_session_state(ws_
     assert "result" in tool_call_result
 
     # The defining behavior this phase is about: genuine token-by-token
-    # streaming, not the whole answer arriving as a single WS message. All
-    # answer_delta events must sit contiguously between the last tool event
-    # and answer_done, each carry non-empty text, and concatenate into a
-    # coherent final answer.
+    # streaming, not the whole answer arriving as a single WS message.
+    # Every answer_delta carries non-empty text, and all segments' deltas
+    # concatenate into a coherent overall answer.
     delta_events = [e for e in events if e["type"] == "answer_delta"]
     assert len(delta_events) > 1, (
         "expected multiple answer_delta chunks (real token streaming), got only "
@@ -205,14 +206,14 @@ def test_ws_stream_emits_tool_events_then_streamed_answer_then_session_state(ws_
     full_answer = "".join(d["content"] for d in delta_events)
     assert full_answer.strip()
 
-    # Every answer_delta must land strictly between the last tool_call_result
-    # and answer_done -- i.e. deltas and tool events never interleave (tool
-    # calls fully resolve before the final answer starts streaming) and no
-    # delta arrives after the stream was marked done.
+    # The turn's FINAL answer segment must stream after the last tool event
+    # (tool calls fully resolve before the closing answer), and no delta
+    # arrives after the last answer_done. A pre-tool segment's deltas may
+    # legitimately precede the tool events -- see the ordering note above.
     last_tool_idx = max(i for i, t in enumerate(types) if t in ("tool_call_start", "tool_call_result"))
     delta_indices = [i for i, t in enumerate(types) if t == "answer_delta"]
-    assert min(delta_indices) > last_tool_idx
-    assert max(delta_indices) < done_idx
+    assert max(delta_indices) > last_tool_idx
+    assert max(delta_indices) < last_done_idx
 
     state_event = events[state_idx]
     assert "active_filters" in state_event["state"]

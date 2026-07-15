@@ -244,16 +244,19 @@ function compactResult(result) {
 // time — so "the most recent pending card" is an unambiguous match.
 //
 // answer_delta/answer_done follow the identical in-place-mutation
-// pattern: the first delta of a turn APPENDS one bubble object
+// pattern: the first delta of a SEGMENT appends one bubble object
 // (`streaming: true`, `content: ''`) and every delta after that MUTATES
 // its `.content` in place (`+=`) — never pushes a new bubble — so the
 // answer visibly grows token-by-token instead of popping in all at once.
 // `currentAnswerMessage` (declared near the top of this file, see comment
 // there) tracks which bubble is still accepting deltas; answer_done clears
-// it and flips `streaming` off (stops the blinking cursor). Only one answer
-// stream is ever in flight at a time (the server only starts streaming the
-// final answer after every tool call for the turn has already resolved),
-// so there's no ambiguity about which bubble a delta belongs to.
+// it and flips `streaming` off (stops the blinking cursor). A turn can
+// carry more than one segment (see useChatSocket.js's protocol recap: the
+// model sometimes writes the first part of its answer before its tool
+// calls) — each segment is its own bubble, opened by its first delta and
+// closed by its own answer_done, so tool cards naturally slot in between.
+// Only one segment is ever streaming at a time, so there's no ambiguity
+// about which bubble a delta belongs to.
 
 const socket = useChatSocket({
   onToolStart(data) {
@@ -292,8 +295,15 @@ const socket = useChatSocket({
   },
   onAnswerDelta(data) {
     if (!currentAnswerMessage) {
-      currentAnswerMessage = { id: nextId(), type: 'answer', content: '', streaming: true }
-      messages.value.push(currentAnswerMessage)
+      // Push first, then re-read the element out of the reactive array:
+      // the array stores the raw object, but reads through the array's
+      // proxy return its reactive wrapper — and only mutations through
+      // that wrapper trigger re-renders. Retaining the pre-push raw
+      // reference here is exactly what froze the bubble after the first
+      // delta (every `.content +=` bypassed reactivity until the
+      // end-of-turn session_state render flushed it all at once).
+      messages.value.push({ id: nextId(), type: 'answer', content: '', streaming: true })
+      currentAnswerMessage = messages.value[messages.value.length - 1]
     }
     currentAnswerMessage.content += data.content
     scrollToBottom()
@@ -303,18 +313,6 @@ const socket = useChatSocket({
       currentAnswerMessage.streaming = false
     }
     currentAnswerMessage = null
-  },
-  onAnswerRetract() {
-    // The backend streamed some deltas optimistically, then discovered the
-    // LLM was actually narrating ahead of a tool call rather than giving
-    // its final answer — remove the bubble entirely instead of leaving
-    // stray "Let me look that up..." text in the transcript. A real
-    // answer_delta run for this turn follows once the tool call resolves.
-    if (currentAnswerMessage) {
-      const idx = messages.value.findIndex((m) => m.id === currentAnswerMessage.id)
-      if (idx !== -1) messages.value.splice(idx, 1)
-      currentAnswerMessage = null
-    }
   },
   onSessionState(data) {
     sessionState.value = data.state || {}
