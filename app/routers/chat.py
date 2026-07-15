@@ -26,9 +26,40 @@ frontend one at a time, not batched until the whole turn finishes):
     {"type": "tool_call_result", "tool": "<name>", "result": {...}}
         ^ one start/result pair per individual tool call, emitted as each
           one actually happens (see app/agent/graph.py's tools_node
-          `tool_event_sink` hook) -- not held back until every tool call in
+          `event_sink` hook) -- not held back until every tool call in
           the turn has finished.
-    {"type": "answer", "content": "..."}             (once, final answer)
+    {"type": "answer_delta", "content": "<chunk text>"}
+        ^ zero or more, one per token/token-chunk of the final natural-
+          language answer, emitted the moment app/agent/graph.py's
+          `agent_node` streams them from the LLM (see
+          `_stream_agent_response`) -- NOT held back until generation
+          finishes. Meant to only ever be the user-facing final answer, not
+          an intermediate tool-call-selection turn -- but see
+          `answer_retract` below for the one case that isn't guaranteed.
+    {"type": "answer_done"}                          (end of a real answer
+                                                       stream -- tells the
+                                                       client to stop
+                                                       appending further
+                                                       deltas into that
+                                                       bubble and do any
+                                                       final render)
+    {"type": "answer_retract"}                       (rare: some
+                                                       answer_delta events
+                                                       were already sent for
+                                                       what turned out to
+                                                       actually be a
+                                                       tool-call turn, not
+                                                       the final answer --
+                                                       SYSTEM_PROMPT tells
+                                                       the model not to
+                                                       narrate before
+                                                       calling a tool, but a
+                                                       real run showed it
+                                                       doing so anyway
+                                                       sometimes; the client
+                                                       must discard that
+                                                       bubble entirely, not
+                                                       finalize it)
     {"type": "session_state", "state": {...}}          (once, end of turn;
                                                          same shape as
                                                          POST /chat's
@@ -41,6 +72,9 @@ frontend one at a time, not batched until the whole turn finishes):
 """
 import asyncio
 import contextlib
+import json
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from fastapi import (
@@ -132,8 +166,30 @@ async def chat(
     return {"answer": answer, "results": results, "session_state": session_state}
 
 
+def _json_default(obj: Any) -> Any:
+    """`json.dumps` doesn't know Decimal (Postgres NUMERIC columns come back
+    as Decimal via asyncpg/SQLAlchemy) or datetime -- tool results from
+    run_readonly_sql/build_filter_sql/lookup_asin can contain either.
+    Starlette's WebSocket.send_json has no hook for a custom encoder, so
+    _send_json bypasses it and serializes manually instead.
+
+    Without this, a tool result containing so much as one Decimal (e.g.
+    computed_roi_pct) raises TypeError deep inside send_json, which is
+    unhandled and kills the whole WebSocket connection mid-turn with no
+    close frame -- not a graceful error event, a hard drop. This was a real
+    bug, not a hypothetical: reproduced live via a Chinese-language question
+    that triggered a self-correcting multi-tool-call SQL sequence pulling
+    computed_roi_pct/amazon_buybox_pct/supplier_cost."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 async def _send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
-    await websocket.send_json(payload)
+    text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False, default=_json_default)
+    await websocket.send_text(text)
 
 
 async def _send_error(websocket: WebSocket, detail: str) -> None:
@@ -149,22 +205,27 @@ async def _run_streaming_turn(
     body: ChatRequest,
 ) -> None:
     """Runs one `/chat` turn, forwarding tool_call_start/tool_call_result
-    events to `websocket` as they happen (not after the whole turn
-    finishes), then the final answer + session_state.
+    events AND the final answer's answer_delta/answer_done events to
+    `websocket` as they happen (not after the whole turn finishes), then
+    session_state.
 
     `graph.ainvoke()` blocks until the entire turn (every tool round) is
     done -- there's no way to get events out of it mid-flight other than a
     concurrency bridge. So this runs `ainvoke()` as a background task and
     threads an `asyncio.Queue`-backed sink into it via
-    `config["configurable"]["tool_event_sink"]`
-    (app/agent/graph.py's `tools_node` calls it once per individual tool
-    call, before and after dispatch); this coroutine concurrently drains
-    the queue and forwards each item to the websocket the moment it
-    arrives, which is what actually makes the tool events incremental on
-    the wire instead of buffered until `ainvoke()` returns.
+    `config["configurable"]["event_sink"]` (app/agent/graph.py's
+    `tools_node` calls it once per individual tool call, before and after
+    dispatch; `agent_node`/`_stream_agent_response` calls it once per token
+    of the final answer -- see that module for how it tells a tool-call-
+    selection LLM turn's tokens apart from the user-facing answer's); this
+    coroutine concurrently drains the queue and forwards each item to the
+    websocket the moment it arrives, which is what actually makes both the
+    tool events AND the answer text incremental on the wire instead of
+    buffered until `ainvoke()` returns.
     """
     collector = TokenUsageCollector()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    answer_streamed = False
 
     async def sink(event: dict[str, Any]) -> None:
         await queue.put(event)
@@ -173,7 +234,7 @@ async def _run_streaming_turn(
         "configurable": {
             "thread_id": body.session_id,
             "user_id": str(user.id),
-            "tool_event_sink": sink,
+            "event_sink": sink,
         },
         "callbacks": [collector],
     }
@@ -200,6 +261,16 @@ async def _run_streaming_turn(
             if "__error__" in item:
                 turn_error = item["__error__"]
                 break
+            item_type = item.get("type")
+            if item_type == "answer_done":
+                # Only a real, completed answer stream counts -- NOT a mere
+                # answer_delta, since a run of deltas can still end in an
+                # answer_retract (app/agent/graph.py's
+                # `_stream_agent_response`: the model narrated before an
+                # eventual tool call) rather than an answer_done.
+                answer_streamed = True
+            elif item_type == "answer_retract":
+                answer_streamed = False
             await _send_json(websocket, item)
     finally:
         if not task.done():
@@ -221,8 +292,19 @@ async def _run_streaming_turn(
         return
 
     assert result_state is not None
-    answer = last_ai_text(result_state["messages"])
-    await _send_json(websocket, {"type": "answer", "content": answer})
+    if not answer_streamed:
+        # Defensive fallback -- should not happen on the normal path (every
+        # turn that ends in a real user-facing AIMessage streams it via
+        # agent_node's event_sink hook above), but if a turn ever ends
+        # without ever running a final non-tool-call agent round (e.g. it
+        # hit MAX_TOOL_ROUNDS mid-tool-call and `should_continue` ended the
+        # graph on an AIMessage that still has tool_calls set), fall back to
+        # sending whatever text is there in one shot rather than silently
+        # dropping it.
+        answer = last_ai_text(result_state["messages"])
+        if answer:
+            await _send_json(websocket, {"type": "answer_delta", "content": answer})
+            await _send_json(websocket, {"type": "answer_done"})
     await _send_json(websocket, {"type": "session_state", "state": _session_state(result_state)})
 
 

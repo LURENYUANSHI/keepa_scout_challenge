@@ -89,6 +89,20 @@ function compactResult(result) {
 // warns about. Tool calls are dispatched strictly sequentially by
 // tools_node (app/agent/graph.py) — never more than one pending card at a
 // time — so "the most recent pending card" is an unambiguous match.
+//
+// answer_delta/answer_done follow the identical in-place-mutation
+// pattern: the first delta of a turn APPENDS one bubble object
+// (`streaming: true`, `content: ''`) and every delta after that MUTATES
+// its `.content` in place (`+=`) — never pushes a new bubble — so the
+// answer visibly grows token-by-token instead of popping in all at once.
+// `currentAnswerMessage` tracks which bubble is still accepting deltas;
+// answer_done clears it and flips `streaming` off (stops the blinking
+// cursor). Only one answer stream is ever in flight at a time (the server
+// only starts streaming the final answer after every tool call for the
+// turn has already resolved), so there's no ambiguity about which bubble
+// a delta belongs to.
+let currentAnswerMessage = null
+
 const socket = useChatSocket({
   onToolStart(data) {
     messages.value.push({
@@ -124,15 +138,44 @@ const socket = useChatSocket({
     })
     scrollToBottom()
   },
-  onAnswer(data) {
-    messages.value.push({ id: nextId(), type: 'answer', content: data.content })
+  onAnswerDelta(data) {
+    if (!currentAnswerMessage) {
+      currentAnswerMessage = { id: nextId(), type: 'answer', content: '', streaming: true }
+      messages.value.push(currentAnswerMessage)
+    }
+    currentAnswerMessage.content += data.content
     scrollToBottom()
+  },
+  onAnswerDone() {
+    if (currentAnswerMessage) {
+      currentAnswerMessage.streaming = false
+    }
+    currentAnswerMessage = null
+  },
+  onAnswerRetract() {
+    // The backend streamed some deltas optimistically, then discovered the
+    // LLM was actually narrating ahead of a tool call rather than giving
+    // its final answer — remove the bubble entirely instead of leaving
+    // stray "Let me look that up..." text in the transcript. A real
+    // answer_delta run for this turn follows once the tool call resolves.
+    if (currentAnswerMessage) {
+      const idx = messages.value.findIndex((m) => m.id === currentAnswerMessage.id)
+      if (idx !== -1) messages.value.splice(idx, 1)
+      currentAnswerMessage = null
+    }
   },
   onSessionState(data) {
     sessionState.value = data.state || {}
     turnInFlight.value = false
   },
   onTurnError(data) {
+    // A turn-level error can arrive mid-stream (e.g. the graph blew up
+    // after already having streamed a few answer_delta events) — don't
+    // leave a bubble stuck showing a blinking "still streaming" cursor.
+    if (currentAnswerMessage) {
+      currentAnswerMessage.streaming = false
+      currentAnswerMessage = null
+    }
     messages.value.push({ id: nextId(), type: 'error', content: data.detail })
     turnInFlight.value = false
     scrollToBottom()
@@ -174,6 +217,7 @@ function startNewChat() {
   sessionId.value = newSessionId()
   messages.value = []
   sessionState.value = { active_filters: {}, last_result_asins: [], resolved_entity: null }
+  currentAnswerMessage = null
 }
 
 onMounted(() => {

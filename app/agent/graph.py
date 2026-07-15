@@ -124,6 +124,11 @@ Tool usage:
 - reset_topic: the user explicitly wants to change topics / drop the
   current filters and start over.
 
+When you decide to call a tool, call it directly -- do NOT write any
+narration/commentary beforehand (no "Let me look that up", "I'll fetch
+that for you", etc.). Save all visible prose for your final response, after
+every tool call for this turn has already resolved.
+
 Always answer using only data the tools actually returned -- never fabricate
 ASINs, prices, or metrics. If a snapshot is stale or a price looks
 anomalous, the tool output will say so; mention it."""
@@ -132,11 +137,25 @@ MAX_TOOL_ROUNDS = 4
 
 
 def _build_llm() -> ChatOpenAI:
+    # `streaming=True` + `stream_usage=True`: required for token-by-token
+    # output to be available at all (app/routers/chat.py's WS handler
+    # streams the final answer to the client as it's generated, not as one
+    # blocking response) -- verified against this exact pinned version
+    # (langchain-openai==0.1.25) that `stream_usage=True` is required for
+    # the OpenAI-compatible `stream_options: {"include_usage": true}` request
+    # flag to be set, which is what makes usage numbers show up at all on a
+    # streamed response (see app/agent/usage.py's `TokenUsageCollector` for
+    # the other half of this: `response.llm_output` is `None` for a
+    # streamed call in this version, `usage_metadata` moves to each
+    # generation's `.message` instead -- confirmed empirically against a
+    # real DeepSeek call, not assumed).
     return ChatOpenAI(
         base_url=settings.LLM_BASE_URL,
         api_key=settings.LLM_API_KEY,
         model=settings.LLM_MODEL,
         temperature=0,
+        streaming=True,
+        stream_usage=True,
     ).bind_tools(ALL_TOOLS)
 
 
@@ -182,6 +201,106 @@ async def _session_context_message(state: AgentState, config: RunnableConfig) ->
     return SystemMessage(content="Session context:\n" + "\n".join(f"- {line}" for line in lines))
 
 
+def _chunk_text(content: Any) -> str:
+    """Best-effort plain text out of one streamed chunk's `.content` --
+    almost always already a `str` for this repo's OpenAI-compatible
+    provider (verified empirically), but some providers emit a list of
+    content blocks per chunk; mirrors `last_ai_text`'s handling of that
+    shape below."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return ""
+
+
+async def _stream_agent_response(
+    llm: ChatOpenAI, messages: list[Any], config: RunnableConfig, sink: Any
+) -> AIMessage:
+    """Streams this one LLM call token-by-token, forwarding the user-facing
+    final-answer tokens to `sink` as `{"type": "answer_delta", ...}` events
+    (app/routers/chat.py's WS protocol), followed by `{"type":
+    "answer_done"}` once the stream ends -- or, if what looked like an
+    answer turns out to have been a tool-call turn after all, a
+    `{"type": "answer_retract"}` instead (see below).
+
+    `agent_node` runs once per tool round (see `should_continue` below); a
+    round's LLM call either ends in an `AIMessage` with `tool_calls` set
+    (the model chose to call a tool -- not shown to the user as "answer"
+    text) or one with none (the turn's actual user-facing answer, which
+    ends the graph). Both kinds of call go through this same node and the
+    same model, so which one a given stream is can only be told apart from
+    the stream's own content/tool_call_chunks as they arrive, not from
+    which node is executing.
+
+    Verified empirically against a real DeepSeek streaming call (this
+    repo's actual configured LLM, an OpenAI-compatible tool-calling API,
+    see app/config.py's LLM_BASE_URL/LLM_MODEL): a tool-call turn's
+    `tool_call_chunks` always carry the tool name before any argument text
+    arrives, and once `tool_call_chunks` start, `content` is always empty
+    for the rest of that turn. So the *tail* of a tool-call turn is
+    unambiguous. Its *head* is not, though: SYSTEM_PROMPT above tells the
+    model not to narrate before calling a tool, but a real run against this
+    exact model still showed it doing so on occasion (a full sentence of
+    "Let me start by fetching..." content BEFORE any `tool_call_chunks`
+    appeared in the same stream) -- so content-first-then-tool-call is a
+    real, observed shape, not just a hypothetical.
+
+    Given that, this can't safely wait for full certainty before forwarding
+    anything (that would mean buffering the entire answer turn too, which
+    is exactly the "wait, then dump it all at once" bug this whole feature
+    exists to fix). Instead it streams optimistically the moment it sees
+    content with zero `tool_call_chunks` so far, and if `tool_call_chunks`
+    then shows up LATER in that same stream (proving it was actually a
+    tool-call turn all along), it sends one `{"type": "answer_retract"}`
+    telling the client to discard the bubble it just started -- a rare
+    correction, not the common case, but a real one (confirmed against a
+    live run, not assumed away).
+    """
+    full: Any = None
+    decided: str | None = None  # None (undecided) -> "tool_call" | "answer"
+    async for chunk in llm.astream(messages, config=config):
+        full = chunk if full is None else full + chunk
+        text = _chunk_text(chunk.content)
+
+        if full.tool_call_chunks and decided != "tool_call":
+            if decided == "answer":
+                await sink({"type": "answer_retract"})
+            decided = "tool_call"
+            continue
+
+        if decided is None:
+            if text:
+                decided = "answer"
+                await sink({"type": "answer_delta", "content": text})
+            # else: still ambiguous (e.g. a role-only preamble chunk with
+            # neither content nor tool_call_chunks yet) -- wait for more.
+            continue
+
+        if decided == "answer" and text:
+            await sink({"type": "answer_delta", "content": text})
+
+    if decided == "answer":
+        await sink({"type": "answer_done"})
+
+    if full is None:
+        return AIMessage(content="")
+
+    # Rebuild as a plain `AIMessage` (not the `AIMessageChunk` subclass
+    # `+`-accumulation produces) so downstream code (tools_node's
+    # `last.tool_calls`, `should_continue`, checkpointer serialization) sees
+    # exactly the same shape a non-streaming `llm.ainvoke()` call returns.
+    return AIMessage(
+        content=full.content,
+        tool_calls=full.tool_calls,
+        invalid_tool_calls=full.invalid_tool_calls,
+        additional_kwargs=full.additional_kwargs,
+        response_metadata=full.response_metadata,
+        usage_metadata=full.usage_metadata,
+        id=full.id,
+    )
+
+
 async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     llm = _build_llm()
     messages = [SystemMessage(content=SYSTEM_PROMPT)]
@@ -189,7 +308,15 @@ async def agent_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     if context_message is not None:
         messages.append(context_message)
     messages.extend(state["messages"])
-    response = await llm.ainvoke(messages, config=config)
+
+    sink = config.get("configurable", {}).get("event_sink")
+    if sink is None:
+        # No caller wants incremental events (POST /chat, most of
+        # tests/test_tool_*.py) -- keep the plain non-streaming call.
+        response = await llm.ainvoke(messages, config=config)
+        return {"messages": [response]}
+
+    response = await _stream_agent_response(llm, messages, config, sink)
     return {"messages": [response]}
 
 
@@ -333,12 +460,16 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             "tools_node: no Store found in config -- was the graph compiled with store=...?"
         )
 
-    # Optional per-tool-call progress sink -- `async def sink(event: dict)`,
-    # threaded in via `config["configurable"]["tool_event_sink"]` (an
-    # ordinary dict entry, same mechanism `thread_id`/`user_id` already use;
+    # Optional per-event progress sink -- `async def sink(event: dict)`,
+    # threaded in via `config["configurable"]["event_sink"]` (an ordinary
+    # dict entry, same mechanism `thread_id`/`user_id` already use;
     # confirmed safe against the checkpointer, which only persists
     # `channel_values`/run metadata, never the full `configurable` dict, so
-    # a non-JSON-serializable callable living there is fine).
+    # a non-JSON-serializable callable living there is fine). The exact same
+    # sink is also used by `agent_node`/`_stream_agent_response` above for
+    # `answer_delta`/`answer_done` events -- one sink, one ordered queue on
+    # the router side (app/routers/chat.py), so tool events and answer
+    # tokens interleave in the true chronological order they happen in.
     #
     # Why this exists instead of leaning on `astream_events`/`astream(...,
     # stream_mode="updates")` for tool-level granularity (WS
@@ -360,7 +491,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     # changing this node's behavior at all when no sink is provided
     # (`sink is None` is the path every existing caller -- POST /chat,
     # every test in tests/test_tool_*.py -- already takes).
-    sink = configurable.get("tool_event_sink")
+    sink = configurable.get("event_sink")
 
     tool_messages: list[ToolMessage] = []
     state_updates: dict[str, Any] = {}

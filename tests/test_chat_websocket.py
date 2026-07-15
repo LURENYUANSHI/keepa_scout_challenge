@@ -118,7 +118,7 @@ def _register(tc: TestClient) -> str:
     return resp.json()["access_token"]
 
 
-def test_ws_stream_emits_tool_events_before_answer_and_session_state(ws_client):
+def test_ws_stream_emits_tool_events_then_streamed_answer_then_session_state(ws_client):
     token = _register(ws_client)
     session_id = f"ws-test-{uuid.uuid4().hex}"
 
@@ -131,7 +131,7 @@ def test_ws_stream_emits_tool_events_before_answer_and_session_state(ws_client):
         )
 
         events = []
-        for _ in range(50):  # hard cap so a protocol bug can't hang the test
+        for _ in range(500):  # hard cap so a protocol bug can't hang the test
             event = ws.receive_json()
             events.append(event)
             if event["type"] == "session_state":
@@ -143,17 +143,21 @@ def test_ws_stream_emits_tool_events_before_answer_and_session_state(ws_client):
     assert "error" not in types, f"unexpected error event(s): {events}"
     assert "tool_call_start" in types, f"expected a tool call; got: {events}"
     assert "tool_call_result" in types, f"expected a tool result; got: {events}"
-    assert "answer" in types
+    assert "answer" not in types, "the old single-shot 'answer' event must be gone"
+    assert "answer_delta" in types, f"expected streamed answer_delta events; got: {events}"
+    assert "answer_done" in types
     assert "session_state" in types
 
     # Ordering: each tool_call_start precedes its matching tool_call_result,
-    # and both precede the final answer/session_state (HARNESS.md §10.3 --
-    # events must arrive one at a time, not all dumped together at the end).
+    # and both precede the streamed answer, which precedes session_state
+    # (HARNESS.md §10.3 -- events must arrive one at a time, not all dumped
+    # together at the end).
     start_idx = types.index("tool_call_start")
     result_idx = types.index("tool_call_result")
-    answer_idx = types.index("answer")
+    first_delta_idx = types.index("answer_delta")
+    done_idx = types.index("answer_done")
     state_idx = types.index("session_state")
-    assert start_idx < result_idx < answer_idx < state_idx
+    assert start_idx < result_idx < first_delta_idx < done_idx < state_idx
 
     tool_call_start = events[start_idx]
     assert tool_call_start["tool"]
@@ -162,8 +166,30 @@ def test_ws_stream_emits_tool_events_before_answer_and_session_state(ws_client):
     assert tool_call_result["tool"] == tool_call_start["tool"]
     assert "result" in tool_call_result
 
-    answer_event = events[answer_idx]
-    assert isinstance(answer_event["content"], str) and answer_event["content"].strip()
+    # The defining behavior this phase is about: genuine token-by-token
+    # streaming, not the whole answer arriving as a single WS message. All
+    # answer_delta events must sit contiguously between the last tool event
+    # and answer_done, each carry non-empty text, and concatenate into a
+    # coherent final answer.
+    delta_events = [e for e in events if e["type"] == "answer_delta"]
+    assert len(delta_events) > 1, (
+        "expected multiple answer_delta chunks (real token streaming), got only "
+        f"{len(delta_events)}: {delta_events}"
+    )
+    for delta in delta_events:
+        assert isinstance(delta["content"], str) and delta["content"] != ""
+
+    full_answer = "".join(d["content"] for d in delta_events)
+    assert full_answer.strip()
+
+    # Every answer_delta must land strictly between the last tool_call_result
+    # and answer_done -- i.e. deltas and tool events never interleave (tool
+    # calls fully resolve before the final answer starts streaming) and no
+    # delta arrives after the stream was marked done.
+    last_tool_idx = max(i for i, t in enumerate(types) if t in ("tool_call_start", "tool_call_result"))
+    delta_indices = [i for i, t in enumerate(types) if t == "answer_delta"]
+    assert min(delta_indices) > last_tool_idx
+    assert max(delta_indices) < done_idx
 
     state_event = events[state_idx]
     assert "active_filters" in state_event["state"]
@@ -187,7 +213,7 @@ def test_ws_stream_keeps_connection_open_across_multiple_turns(ws_client):
         ):
             ws.send_json({"session_id": session_id, "message": message})
             saw_session_state = False
-            for _ in range(50):
+            for _ in range(500):
                 event = ws.receive_json()
                 if event["type"] == "error":
                     pytest.fail(f"unexpected error event: {event}")
@@ -217,7 +243,7 @@ def test_ws_stream_wrong_session_owner_gets_error_event_not_disconnect(ws_client
     # user A creates/owns the session first.
     with ws_client.websocket_connect(f"/chat/stream?token={token_a}") as ws:
         ws.send_json({"session_id": session_id, "message": "What does ROI mean?"})
-        for _ in range(50):
+        for _ in range(500):
             event = ws.receive_json()
             if event["type"] == "session_state":
                 break
@@ -233,9 +259,95 @@ def test_ws_stream_wrong_session_owner_gets_error_event_not_disconnect(ws_client
 
         own_session_id = f"ws-test-{uuid.uuid4().hex}"
         ws.send_json({"session_id": own_session_id, "message": "What does ROI mean?"})
-        for _ in range(50):
+        for _ in range(500):
             event = ws.receive_json()
             if event["type"] == "session_state":
                 break
         else:
             pytest.fail("connection did not recover for a fresh session_id after the ownership error")
+
+
+# --- regression: Decimal in a tool result must not kill the connection ---
+#
+# Real bug, not hypothetical: reproduced live via a Chinese-language question
+# that made the model self-correct through a multi-step run_readonly_sql
+# sequence and land on a query selecting computed_roi_pct/supplier_cost/
+# amazon_buybox_pct -- Postgres NUMERIC columns come back as `Decimal` via
+# asyncpg/SQLAlchemy, and `_send_json`'s old implementation
+# (`websocket.send_json`) has no hook for a custom JSON encoder, so the
+# first Decimal in any tool_call_result payload raised an unhandled
+# `TypeError: Object of type Decimal is not JSON serializable` deep inside
+# Starlette -- which killed the WebSocket with no close frame, not a
+# graceful error event. Two tests: a fast unit test on `_json_default`
+# directly (no network/DB), and an end-to-end one that forces a real
+# Decimal through a real tool call.
+
+
+def test_json_default_converts_decimal_and_datetime():
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from app.routers.chat import _json_default
+
+    assert _json_default(Decimal("80.60")) == 80.6
+    assert isinstance(_json_default(Decimal("80.60")), float)
+    assert _json_default(datetime(2026, 7, 15, tzinfo=timezone.utc)) == "2026-07-15T00:00:00+00:00"
+    with pytest.raises(TypeError):
+        _json_default(object())
+
+
+def test_send_json_serializes_decimal_without_crashing(ws_client):
+    import asyncio
+    from decimal import Decimal
+
+    from app.routers.chat import _send_json
+
+    class _FakeWebSocket:
+        def __init__(self):
+            self.sent: list[str] = []
+
+        async def send_text(self, text: str) -> None:
+            self.sent.append(text)
+
+    fake_ws = _FakeWebSocket()
+    payload = {
+        "type": "tool_call_result",
+        "tool": "run_readonly_sql",
+        "result": {"rows": [{"asin": "B00TEST", "computed_roi_pct": Decimal("101.83"), "supplier_cost": Decimal("15.90")}]},
+    }
+    asyncio.get_event_loop().run_until_complete(_send_json(fake_ws, payload))
+    assert len(fake_ws.sent) == 1
+    assert '"computed_roi_pct":101.83' in fake_ws.sent[0]
+
+
+def test_ws_stream_survives_decimal_bearing_tool_result(ws_client):
+    """End-to-end: force run_readonly_sql to select a real NUMERIC column
+    and confirm the turn completes normally (answer_done + session_state),
+    not a dead connection."""
+    token = _register(ws_client)
+    session_id = f"ws-test-{uuid.uuid4().hex}"
+
+    with ws_client.websocket_connect(f"/chat/stream?token={token}") as ws:
+        ws.send_json(
+            {
+                "session_id": session_id,
+                "message": "Run a SQL query selecting asin and computed_roi_pct from asins, "
+                "ordered by computed_roi_pct descending, limit 3.",
+            }
+        )
+        saw_tool_result_with_decimal_like_value = False
+        for _ in range(500):
+            event = ws.receive_json()
+            if event.get("type") == "tool_call_result":
+                rows = (event.get("result") or {}).get("rows") or []
+                if any("computed_roi_pct" in row for row in rows):
+                    saw_tool_result_with_decimal_like_value = True
+            if event["type"] == "session_state":
+                break
+        else:
+            pytest.fail("connection died before session_state -- Decimal serialization regressed")
+
+        assert saw_tool_result_with_decimal_like_value, (
+            "test didn't actually exercise a computed_roi_pct-bearing row -- "
+            "strengthen the prompt so this test still catches the regression"
+        )

@@ -13,9 +13,18 @@
 // - Server sends, per turn, in order: zero or more
 //   `tool_call_start`/`tool_call_result` pairs (one pair per tool call, sent
 //   the moment each happens — never batched), then either
-//   `{"type":"answer", ...}` + `{"type":"session_state", ...}` on success,
-//   or a single `{"type":"error", ...}` on turn failure (which does NOT
-//   close the connection — the client can send the next turn).
+//   zero-or-more `{"type":"answer_delta", "content": "..."}` (one per
+//   token/token-chunk of the final answer, sent as the LLM generates them —
+//   never batched) followed by `{"type":"answer_done"}` +
+//   `{"type":"session_state", ...}` on success, or a single
+//   `{"type":"error", ...}` on turn failure (which does NOT close the
+//   connection — the client can send the next turn).
+// - Rare: a run of `answer_delta`s can be followed by
+//   `{"type":"answer_retract"}` instead of `answer_done` — the backend
+//   optimistically streams as soon as it sees answer-shaped text, but the
+//   underlying LLM occasionally narrates ("Let me look that up...") right
+//   before deciding to call a tool after all; the client must then discard
+//   that in-progress bubble entirely rather than finalize it.
 //
 // HARNESS.md §10.3 point 3: a broken WS must never leave the UI silently
 // stuck. This composable surfaces a `status` ref the component renders as a
@@ -65,8 +74,14 @@ export function useChatSocket(handlers = {}) {
       case 'tool_call_result':
         handlers.onToolResult?.(data)
         break
-      case 'answer':
-        handlers.onAnswer?.(data)
+      case 'answer_delta':
+        handlers.onAnswerDelta?.(data)
+        break
+      case 'answer_done':
+        handlers.onAnswerDone?.(data)
+        break
+      case 'answer_retract':
+        handlers.onAnswerRetract?.(data)
         break
       case 'session_state':
         handlers.onSessionState?.(data)

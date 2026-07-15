@@ -17,6 +17,24 @@ the OpenAI-compatible response's `usage` field on every call in this
 version (verified against a real DeepSeek call, not assumed) -- so the
 numbers are identical, just collected by hand instead of by an official
 helper.
+
+**Second deviation, added when `app/agent/graph.py`'s `ChatOpenAI` got
+`streaming=True` (final-answer token streaming, WS /chat/stream)**: the
+`response.llm_output["token_usage"]` shape above is what a *non-streaming*
+call returns. Verified empirically against a real DeepSeek call in this
+exact environment with `streaming=True, stream_usage=True` set (both
+required for the OpenAI-compatible `stream_options: {"include_usage":
+true}` request to even get sent): a streamed call's aggregated
+`LLMResult.llm_output` comes back as `None` -- `on_llm_end`'s callback
+never gets a `token_usage` dict to read at all -- but each
+`LLMResult.generations[i][j].message.usage_metadata` (the same
+`AIMessage.usage_metadata` shape `llm.ainvoke()` always exposed) is
+populated correctly on the final aggregated chunk. Since `streaming=True`
+on the `ChatOpenAI` instance makes even a plain `llm.ainvoke()` call route
+through the same streaming code path internally (confirmed: `.ainvoke()`
+with `streaming=True` also comes back with `llm_output=None`), this
+fallback path below is now taken by *every* LLM call in this app, not just
+the ones that go through `_stream_agent_response`.
 """
 from __future__ import annotations
 
@@ -52,12 +70,25 @@ class TokenUsageCollector(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> None:
         usage = (response.llm_output or {}).get("token_usage") or {}
-        if not usage:
+        if usage:
+            self.input_tokens += usage.get("prompt_tokens", 0) or 0
+            self.output_tokens += usage.get("completion_tokens", 0) or 0
+            self.total_tokens += usage.get("total_tokens", 0) or 0
+            self.call_count += 1
             return
-        self.input_tokens += usage.get("prompt_tokens", 0) or 0
-        self.output_tokens += usage.get("completion_tokens", 0) or 0
-        self.total_tokens += usage.get("total_tokens", 0) or 0
-        self.call_count += 1
+
+        # Streaming path (see module docstring's second deviation): no
+        # `llm_output`, but `usage_metadata` on each generation's message.
+        for generation_list in response.generations or []:
+            for generation in generation_list:
+                message = getattr(generation, "message", None)
+                usage_metadata = getattr(message, "usage_metadata", None) if message else None
+                if not usage_metadata:
+                    continue
+                self.input_tokens += usage_metadata.get("input_tokens", 0) or 0
+                self.output_tokens += usage_metadata.get("output_tokens", 0) or 0
+                self.total_tokens += usage_metadata.get("total_tokens", 0) or 0
+                self.call_count += 1
 
 
 async def log_usage(
