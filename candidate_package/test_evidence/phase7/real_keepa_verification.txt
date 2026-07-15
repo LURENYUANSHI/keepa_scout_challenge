@@ -1,0 +1,7 @@
+=== real Keepa ETL run (network unblocked) ===
+batched 32 ASINs in 1 Keepa calls, 32 ok / 0 not_found / 0 error
+
+=== real /refresh run ===
+{"job_id":"r-639ef0a5bb24","state":"done","total":32,"done":32,"failed":0}
+
+=== Keepa token balance: 269 -> 172 (97 tokens for 32 ASINs, stats=90+buybox+fbafees) ===

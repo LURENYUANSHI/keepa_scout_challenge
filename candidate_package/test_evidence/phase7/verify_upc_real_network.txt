@@ -1,0 +1,24 @@
+=== verify_upc.py — http://localhost:8000 — 7 case(s) from /Users/yu/keepa_scout_challenge/data/upc_test_cases.json ===
+Registered a throwaway user and obtained a token.
+
+[PASS] case_01 (input='070537500052', required=True): asins=['B0000021VO'] — normalized=['070537500052']
+[PASS] case_02 (input='70537500052', required=True): asins=['B0000021VO'] — normalized=['70537500052', '070537500052']
+[PASS] case_03 (input='9780545465298', required=True): asins=['054546529X', 'B00QFX5TNE'] — normalized=['9780545465298']
+[PASS] case_04 (input='00000772041997', required=False): asins=['122308079X'] — normalized=['00000772041997']
+[PASS] case_05 (input='052144100245', required=True): asins=['B000FBKV4O', 'B002YKUNBA', 'B0GRCFJ1CV'] — normalized=['052144100245']
+[FAIL] case_06 (input='999999999999', required=False): asins=[] — normalized=['999999999999']
+[SKIP] case_07 (input='070-537-500-052', required=False): asins=[] — Keepa lookup failed ('070537500052'): ConnectError
+
+=== summary ===
+case_id    required  outcome            asins
+case_01    True      PASS               ['B0000021VO']
+case_02    True      PASS               ['B0000021VO']
+case_03    True      PASS               ['054546529X', 'B00QFX5TNE']
+case_04    False     PASS               ['122308079X']
+case_05    True      PASS               ['B000FBKV4O', 'B002YKUNBA', 'B0GRCFJ1CV']
+case_06    False     FAIL               []
+case_07    False     KEEPA_UNREACHABLE  []
+
+5 PASS / 1 FAIL / 1 KEEPA_UNREACHABLE out of 7 case(s).
+
+NOTE: Keepa was unreachable from this environment for 1 case(s) (GET /upc returned 502 — see app/routers/upc.py's documented 502 path). This is an environment/connectivity issue, NOT evidence the UPC normalization logic (normalize_upc_variants) is wrong -- those cases could not be validated either way. Re-run this script somewhere with live Keepa connectivity to get a real PASS/FAIL verdict on them.
