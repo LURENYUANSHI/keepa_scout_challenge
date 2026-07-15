@@ -1,0 +1,87 @@
+/*
+ * Design tokens — Scout.
+ *
+ * Restyle target: Supersonic Supply (supersonicsupply.com/zh), the hiring
+ * company's actual brand — an AI-run Amazon FBA/wholesale operator. Pulled
+ * from directly inspecting the live site's computed styles:
+ *   - white/near-white background, near-black/navy text, "SN Pro" (a
+ *     geometric grotesque close to Inter) at weight 600-700 for headings
+ *   - left-aligned copy blocks, numbered feature lists, hairline dividers,
+ *     pill-shaped buttons, card panels with soft shadow instead of ruled
+ *     borders
+ *   - their live CTA accent is actually a coral-red (#FF2244); this redesign
+ *     deliberately uses navy + electric blue/cyan instead (per the brief),
+ *     which is also legitimately part of their palette — their tech/ops
+ *     illustrations (dashboards, shipment-network globe) are built almost
+ *     entirely in blue. Using that hue as the interactive accent keeps the
+ *     result recognizably "theirs" while satisfying the brief's explicit
+ *     navy/electric-blue direction and staying far from the old rust-red.
+ *
+ * Palette (one job each — see HARNESS.md §10.2 blacklist: no indigo/violet
+ * "AI gradient" family, no un-curated default Tailwind/shadcn palette):
+ *   --ink    #0B1D2E  primary text / structural lines — near-black navy
+ *   --paper  #F6F8FA  base background — cool off-white, not stark #fff
+ *   --raised #FFFFFF  panel/card surface — pure white, one step lighter
+ *   --blue   #0075FF  the one accent — primary actions, links, focus
+ *   --teal   #0E9F6E  "eligible / pass / good" signal
+ *   --brick  #E0332B  "ineligible / fail / error" signal
+ *   --steel  #5B6B7F  secondary text, hairline borders
+ */
+:root {
+  --ink: #0b1d2e;
+  --ink-soft: #435164;
+  --paper: #f6f8fa;
+  --raised: #ffffff;
+  --blue: #0075ff;
+  --blue-dark: #0058c4;
+  --blue-soft: #e8f2ff;
+  --teal: #0e9f6e;
+  --teal-soft: #e2f7ee;
+  --brick: #e0332b;
+  --brick-soft: #fdeae9;
+  --steel: #5b6b7f;
+  --line: rgba(11, 29, 46, 0.1);
+  --line-strong: rgba(11, 29, 46, 0.22);
+
+  /* rust/rust-dark kept as aliases so nothing that still references the old
+     accent name silently breaks — both now point at the new blue accent. */
+  --rust: var(--blue);
+  --rust-dark: var(--blue-dark);
+
+  /* Type — single geometric-sans family throughout (Inter), used at two
+     weights: 700-800 for headlines, 500 for body/UI. Mono is kept only as a
+     narrow, functional exception for genuine data (ASIN/UPC/session
+     codes) — not as a stylistic voice for chrome (nav/buttons/labels),
+     which is the "ledger" signature this redesign retires. */
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  /* Type scale — ~1.3 ratio, unchanged cadence, new voice */
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-md: 1.0625rem;
+  --text-lg: 1.3125rem;
+  --text-xl: 1.75rem;
+  --text-2xl: 2.375rem;
+  --text-3xl: 3.25rem;
+
+  /* Spacing scale — unchanged, this redesign is visual-only */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4.5rem;
+
+  /* Sharp-corner ledger radii -> soft card-grid radii + a pill radius for
+     buttons/badges, matching the reference site's rounded CTAs. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-pill: 999px;
+
+  --shell-max-width: 72rem;
+}
