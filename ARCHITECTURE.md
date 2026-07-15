@@ -276,12 +276,13 @@ sequenceDiagram
     G->>G: checkpointer 按 thread_id 取出历史消息(含之前的 tool_calls/结果)
     G->>G: store.get(("preferences", user_id)) 取长期偏好
     G->>LLM: messages(system + 短期状态摘要 + 长期偏好摘要 + 本轮 message)\ntools=[build_filter_sql, lookup_asin, plan_combo,\nrun_readonly_sql, update_preferences, reset_topic]
-    LLM-->>G: AIMessage(tool_calls=[...]) 或直接文本(含拒答)
+    LLM-->>G: AIMessage(tool_calls=[...]，可附带工具前答案段文本) 或直接文本(含拒答)
     G->>G: checkpointer 自动把这条 AIMessage 存进 thread 历史
 
     alt 没有 tool_calls（out_of_scope 拒答 / 无需查数据的直接回复）
         Note over G: 短期状态原样保留，走到最后一步
     else 有 tool_calls（ToolNode，最多 N 轮，代码里设上限防止失控循环）
+        Note over G: AIMessage 附带的工具前文本是答案的一部分，保留为独立答案段<br/>(WS 上已按 token 流出、以 answer_done 收尾，不撤回；后续轮次不重复它)
         loop 依次执行每个 tool_call
             G->>G: 按该 tool 的 JSON Schema 校验参数\n(结构化工具只收结构化参数；run_readonly_sql 额外过\nSELECT-only/单语句/禁DDL-DML 安全校验)
             G->>DB: 执行只读查询 / 纯确定性计算(见 4.2 工具清单)
@@ -297,7 +298,8 @@ sequenceDiagram
 
     G->>API: usage_metadata(每次 LLM 调用的 input/output/total tokens)
     API->>DB: INSERT llm_usage_log (user_id, session_id, endpoint='chat', model, tokens...)
-    G-->>API: answer + 本轮 session_state(从 checkpoint 最新状态里读出)
+    G-->>API: 本轮消息态(全部答案段 + tool 结果) + session_state(从 checkpoint 最新状态里读出)
+    API->>API: turn_answer_text: 本轮所有答案段按序拼接为 answer
     API-->>C: {answer, results, session_state}
 ```
 
