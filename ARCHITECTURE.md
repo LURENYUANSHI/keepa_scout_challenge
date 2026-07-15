@@ -15,10 +15,11 @@
 ```mermaid
 flowchart TB
     subgraph Client
-        C[curl / 前端 / Loom 演示]
+        C[浏览器 / curl / Loom 演示]
     end
 
     subgraph Compose["docker compose"]
+        FE["frontend\n(nginx, Vue SPA 静态产物)"]
         API["api\n(FastAPI, uvicorn)"]
         WORKER["worker\n(Celery worker)"]
         BEAT["beat\n(Celery beat — 每天 04:00 UTC 定时刷新)"]
@@ -31,7 +32,8 @@ flowchart TB
         LLM["LLM Provider\n(OpenAI 兼容接口)"]
     end
 
-    C -->|"HTTP + Bearer token"| API
+    C -->|"加载 SPA (静态资源)"| FE
+    C -->|"HTTP + Bearer token；\nWS /chat/stream（每条消息一条连接，\n回合结束即关，见 §3.5）"| API
     API -->|"读写: users / auth_tokens / chat_sessions /\nasins / asin_price_stats / refresh_jobs /\nrefresh_job_items / llm_usage_log"| DB
     API -->|"checkpointer/store 读写\n(短期状态+长期偏好)"| DB
     API -->|"派发任务"| BROKER
@@ -41,6 +43,10 @@ flowchart TB
     BEAT -->|"每天 04:00 UTC 调用与 POST /refresh\n相同的内部函数，复用同一把防重入锁"| BROKER
     API -->|"NL→SQL 生成 / 回答生成"| LLM
 ```
+
+**图 1** 系统部署架构。六个 compose 服务：`frontend` 只分发静态产物，浏览器拿到 SPA 后直连
+`api`；`api` 不在请求线程里跑长任务，全量刷新经 `broker` 交给 `worker`；`beat` 与手动
+`POST /refresh` 复用同一个内部入口。会话记忆（checkpointer/store）与业务表同库存放。
 
 **职责边界**：
 - `api` 只做请求校验、鉴权、读写 DB、把耗时的全量刷新甩给 Celery——不在请求线程里跑长任务
@@ -82,7 +88,9 @@ erDiagram
     CHAT_SESSIONS {
         text session_id PK
         uuid user_id FK "NOT NULL，不允许匿名"
+        text title "可空；首条用户消息前约60字符，只设置一次；NULL 时列表接口从 checkpoint 回填"
         timestamptz created_at
+        timestamptz updated_at "每轮对话 touch，会话列表按它倒序"
     }
     LLM_USAGE_LOG {
         bigserial id PK
@@ -135,10 +143,16 @@ erDiagram
     }
 ```
 
+**图 2** 数据模型（ER）。LangGraph 自建的 `checkpoints`/`checkpoint_writes`/`checkpoint_blobs`/
+`store` 表不在图中重复建模（见图题下方第二条约束与 §4）；`chat_sessions` 是业务侧唯一与会话
+相关的表，承担归属校验与列表元数据（`title`/`updated_at`）两件事。
+
 **关键约束**：
 - `chat_sessions.user_id` **NOT NULL**——没有匿名会话，一个 session 必须属于一个登录用户
-- `chat_sessions` 现在**只做归属校验**（这个 session_id 是不是这个 user 的），不再存
-  `active_filters`/`last_result_asins` 等短期状态——那些字段连同完整的消息/工具调用记录，改由
+- `chat_sessions` 做**归属校验 + 会话列表元数据**两件事：归属（这个 session_id 是不是这个
+  user 的）、`title`（首条用户消息截断，一次性设置，NULL 时由 `GET /chat/sessions` 从
+  checkpoint 首条 HumanMessage 回填并持久化）、`updated_at`（每轮 touch，列表排序键）。
+  **不存** `active_filters`/`last_result_asins` 等短期状态——那些字段连同完整的消息/工具调用记录，由
   **LangGraph 的 Checkpointer**（`AsyncPostgresSaver`，按 `thread_id = session_id`）自动持久化，
   它会在同一个 Postgres 实例里自建 `checkpoints`/`checkpoint_writes`/`checkpoint_blobs` 表，
   本图不重复建模那几张表（细节见 §4）
@@ -179,8 +193,8 @@ sequenceDiagram
         API->>DB: INSERT INTO users (...)
         API->>API: 生成随机 token，计算 hash
         API->>DB: INSERT INTO auth_tokens (token_hash, user_id, expires_at)
-        API->>DB: INSERT INTO user_preferences (user_id) -- 空偏好占位
         API-->>C: 201 {access_token, expires_at}
+        Note over API: 长期偏好无需占位行——LangGraph Store 按<br/>("preferences", user_id) 惰性创建（见 §4）
     end
 
     C->>API: POST /auth/login {email, password}
@@ -193,6 +207,9 @@ sequenceDiagram
         API-->>C: 200 {access_token, expires_at}
     end
 ```
+
+**图 3** 注册与登录。注册即签发 token（免二次登录）；登录失败对"用户不存在"与"密码错误"
+返回同一响应，不泄露邮箱注册状态。
 
 ### 3.2 受保护端点的统一鉴权（所有业务端点都走这一步）
 
@@ -217,9 +234,12 @@ sequenceDiagram
     end
 ```
 
+**图 4** 统一鉴权依赖（`get_current_user`）。token 只存哈希，比对同样先哈希再查表。
+
 **受保护范围**：除 `POST /auth/register`、`POST /auth/login` 外，`/upc`、
-`/eligibility/{asin}`、`/eligibility/batch`、`/ask`、`/chat`、`/refresh`、
-`/refresh/status` 全部要求这一步通过。
+`/eligibility/{asin}`、`/eligibility/batch`、`/ask`、`/chat`、`WS /chat/stream`
+（token 经 query 参数传入，握手前校验，失败以 4401 关闭）、`GET /chat/sessions`、
+`GET /chat/sessions/{id}/messages`、`/refresh`、`/refresh/status` 全部要求这一步通过。
 
 ### 3.3 `/chat`——短期记忆 + 长期偏好 + 工具调用记录如何合并进一次回答
 
@@ -235,11 +255,13 @@ sequenceDiagram
     API->>API: 鉴权 → user_id
     API->>DB: SELECT * FROM chat_sessions WHERE session_id=?
     alt session 不存在
-        API->>DB: INSERT chat_sessions (session_id, user_id, created_at)
+        API->>DB: INSERT chat_sessions (session_id, user_id,<br/>title=首条消息截断, updated_at=now())
         Note over API: 新会话，归属当前登录用户
     else session 存在但 user_id 不匹配
         API-->>C: 403 Forbidden
         Note over API: 防止用别人的 session_id 越权读写
+    else session 存在且归属正确
+        API->>DB: UPDATE chat_sessions SET updated_at=now()<br/>（title 仍为 NULL 时顺带补设，只设一次）
     end
 
     API->>G: graph.ainvoke({message}, config={thread_id: session_id, user_id})
@@ -270,6 +292,12 @@ sequenceDiagram
     G-->>API: answer + 本轮 session_state(从 checkpoint 最新状态里读出)
     API-->>C: {answer, results, session_state}
 ```
+
+**图 5** `/chat` 单轮编排（两种传输共用同一编排）。图中以 `POST /chat`（同步返回）表示；
+`WS /chat/stream` 走完全相同的编排，区别只在返回方式：每个工具调用发生的当刻推送
+`tool_call_start`/`tool_call_result` 事件对，最终回答按 token 级 `answer_delta` 增量推送
+（`answer_done` 收尾，罕见情况下用 `answer_retract` 撤回被误判为答案的工具前独白），
+回合以 `session_state`（成功）或 `error`（失败）事件收束。连接生命周期见图 7。
 
 **为什么这样才对**：上一版里 `build_filter_sql`/`lookup_asin`/`plan_combo` 是代码在"猜"到某个 intent
 之后自己悄悄调用的，LLM 并不知情，消息记录也没地方存——等于对话里发生了什么只有代码自己知道，
@@ -334,6 +362,49 @@ sequenceDiagram
     API->>BR: 重新派发 pending 任务
 ```
 
+**图 6** `/refresh` 防重入与断点续跑。续跑的真相源是 Postgres 的 `refresh_job_items`
+（不是 Redis）；`done+failed` 计数由 `UPDATE ... WHERE state='pending'` 的原子守卫保证
+不越界（该守卫来自一次实测越界 bug 的修复，见 REPORT.md）。
+
+### 3.5 会话历史与"每条消息一条 WS"的连接生命周期
+
+```mermaid
+sequenceDiagram
+    participant B as 浏览器 (Vue SPA)
+    participant API as api
+    participant DB as Postgres(chat_sessions)
+    participant G as LangGraph(checkpointer)
+
+    Note over B: 进入 /chat/:sessionId —— session id 在 URL 里，<br/>刷新/前进后退/分享链接都落回同一会话；<br/>裸 /chat 由前端路由重定向到新生成的 id
+    B->>API: GET /chat/sessions
+    API->>DB: SELECT ... WHERE user_id=? ORDER BY updated_at DESC
+    opt 有 title 为 NULL 的行（早期数据）
+        API->>G: aget_state(thread_id) 取首条用户消息
+        API->>DB: 回填 title 并持久化（每行只发生一次）
+    end
+    API-->>B: 会话列表（侧栏：标题 + 相对时间）
+
+    B->>API: GET /chat/sessions/{id}/messages
+    alt session 属于他人
+        API-->>B: 403
+    else 从未使用过的新 id 或 存在但无 checkpoint
+        API-->>B: 200 []（"还没有消息的对话"是一等状态，不是 404）
+    else 有历史
+        API->>G: aget_state(thread_id)
+        API-->>B: 200 [user/tool/answer 消息序列]（工具卡按 tool_call_id 配对结果）
+    end
+
+    Note over B: 用户点击发送 —— 此刻才建立连接
+    B->>API: 新建 WS /chat/stream?token=... （每条消息一条全新连接）
+    API-->>B: tool_call_start / tool_call_result / answer_delta ... （见图 5）
+    API-->>B: session_state（回合结束）
+    B->>B: 关闭本条 WS，状态回到 idle
+    Note over B,API: 回合之间没有存活连接——无需心跳/重连状态机；<br/>中途断线即本回合失败，重发消息=新连接重试
+```
+
+**图 7** 会话历史加载与每回合独立的 WebSocket 生命周期。历史回放是纯 REST，绝不建立 WS；
+连接只在"发送→回合结束"窗口内存在（该模型的取舍讨论见 REPORT.md 与 useChatSocket.js 头注释）。
+
 ---
 
 ## 4. Agent / LLM 编排技术
@@ -348,8 +419,9 @@ sequenceDiagram
   校验"的黑盒逻辑——控制力不够
 - 手写的 loop 更容易在 Loom 里逐行讲清楚（题目要求"仓库里每一个文件都要讲得清"）
 - **对话里发生的每一步都必须是可回放的**——LLM 决定调用哪个工具、传了什么参数、工具返回了
-  什么，这些不能只存在于一次函数调用的调用栈里，必须是 `chat_messages` 里一条独立的记录
-  （`role=assistant` 带 `tool_calls`，`role=tool` 带 `tool_call_id`+结果）。这是对上一版设计
+  什么，这些不能只存在于一次函数调用的调用栈里，必须是持久化消息历史里一条独立的记录
+  （`AIMessage` 带 `tool_calls`，`ToolMessage` 带 `tool_call_id`+结果；由 checkpointer 落库，
+  `GET /chat/sessions/{id}/messages` 的历史回放直接消费这份记录——图 7）。这是对上一版设计
   的修正——之前把 `build_filter_sql`/`lookup_asin`/`plan_combo` 写成代码在猜出 intent 后自己
   悄悄调用，LLM 并不"知道"这些调用存在，消息表里也没有记录，等于对话的推理链路丢了一段，
   没法审计/回放/在多轮工具调用时把上一步结果正确带给下一步。
@@ -413,7 +485,7 @@ keepa_scout_challenge/
 │   ├── models/                  # ORM 模型，一一对应 §2 ER 图里的表
 │   │   ├── user.py               # users, auth_tokens
 │   │   ├── asin.py               # asins, asin_price_stats
-│   │   ├── chat.py               # chat_sessions（只做归属校验，见 §2）
+│   │   ├── chat.py               # chat_sessions（归属校验 + title/updated_at 列表元数据，见 §2）
 │   │   ├── refresh.py            # refresh_jobs, refresh_job_items
 │   │   └── usage.py              # llm_usage_log
 │   ├── schemas/                 # Pydantic request/response model
@@ -422,7 +494,8 @@ keepa_scout_challenge/
 │   │   ├── upc.py                 # GET /upc
 │   │   ├── eligibility.py         # GET /eligibility/{asin}, POST /eligibility/batch
 │   │   ├── ask.py                 # POST /ask
-│   │   ├── chat.py                # POST /chat —— 只做鉴权/归属校验，实际编排调用 agent/graph.py
+│   │   ├── chat.py                # POST /chat + WS /chat/stream + GET /chat/sessions[/{id}/messages]
+│   │   │                          #   —— 鉴权/归属/历史回放，实际编排调用 agent/graph.py
 │   │   └── refresh.py             # POST /refresh, GET /refresh/status
 │   ├── auth/
 │   │   ├── security.py            # 密码哈希、token 生成/校验(哈希存储，见 §2)
@@ -444,10 +517,13 @@ keepa_scout_challenge/
 │
 ├── frontend/                   # Vue SPA（§10 HARNESS.md）
 │   └── src/
-│       ├── views/                # 登录/注册/ASIN 列表/Chat 等页面
+│       ├── views/                # 登录/注册/Dashboard(eligibility)/UPC/Refresh/Chat 页面
 │       ├── components/
-│       ├── api/                  # 后端接口封装（含 token 注入、流式响应处理）
-│       └── stores/                # session_id/token 状态（Pinia）
+│       ├── composables/          # useChatSocket.js —— 每回合独立 WS 生命周期（图 7）
+│       ├── router/               # /chat/:sessionId 路由；裸 /chat 重定向到新 session id
+│       ├── api/                  # 后端接口封装（token 注入、WS base URL 推导）
+│       ├── utils/                # session id 生成、markdown 渲染
+│       └── stores/                # 登录态（Pinia）
 │
 ├── data/                        # 题目提供，只读，ETL 输入
 │   ├── sample_asins.csv
@@ -458,13 +534,15 @@ keepa_scout_challenge/
 │   ├── test_etl_dirty_data.py
 │   ├── test_ask_examples.py
 │   ├── test_ask_sql_injection.py
+│   ├── test_chat_websocket.py    # WS 流式协议（真实 LLM 调用）
+│   ├── test_chat_sessions.py     # 会话列表/回放/标题回填（图 7 的服务端行为）
 │   └── test_tool_*.py            # 每个工具一个文件，对应 HARNESS.md §7.1 表格
 │
 ├── scripts/                     # HARNESS.md 里引用的验收脚本，都是可独立运行的黑盒脚本
 │   ├── verify_all.sh
 │   ├── verify_auth.sh
 │   ├── verify_upc.py
-│   ├── verify_chat.sh            # 题目要求的必交验收脚本之一
+│   ├── verify_chat.py            # 题目要求的必交验收脚本之一
 │   ├── verify_refresh_resume.sh  # 题目要求的必交验收脚本之一
 │   └── cost_report.py
 │
