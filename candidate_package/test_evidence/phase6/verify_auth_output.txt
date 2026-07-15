@@ -1,0 +1,26 @@
+=== verify_auth.sh — http://localhost:8000 ===
+--- 1. POST /auth/register (user A, new email) -> 201 + usable token ---
+  PASS: register user A (HTTP 201)
+  PASS: register response included a non-empty access_token
+--- 2. POST /auth/register (same email again) -> 409 ---
+  PASS: duplicate-email register (HTTP 409)
+--- 3. POST /auth/login (wrong password) -> 401 ---
+  PASS: wrong-password login (HTTP 401)
+--- 4. POST /auth/login (correct password) -> 200 + new token ---
+  PASS: correct-password login (HTTP 200)
+  PASS: login response included a non-empty access_token
+  PASS: login issued a DIFFERENT token than register (a fresh token, not a cached one)
+--- 5. Protected route with NO token -> 401 ---
+  PASS: protected route, no Authorization header (HTTP 401)
+--- 5b. Protected route with a garbage token -> 401 ---
+  PASS: protected route, garbage token (HTTP 401)
+--- 6. Protected route WITH a valid token -> 200 ---
+  PASS: protected route, valid token (HTTP 200)
+--- 7. Cross-user session_id access -> 403 ---
+    (register user B, have A create a chat session, then B tries to post to it)
+  PASS: register user B (HTTP 201)
+  PASS: user A created/used chat session 'auth-verify-session-1784102268-8131' (HTTP 200)
+  PASS: user B accessing user A's session_id (HTTP 403)
+
+=== verify_auth.sh summary: 13 passed, 0 failed ===
+EXIT CODE: 0

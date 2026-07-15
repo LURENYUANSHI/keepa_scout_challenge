@@ -1,0 +1,36 @@
+{
+    "asin": "B00HEON30Y",
+    "title": "Synthetic Dev Fixture Item (B00HEON30Y)",
+    "eligible": true,
+    "filter_failed": null,
+    "checks": {
+        "referral_fee_pct": {
+            "pass": true,
+            "value": 15.0
+        },
+        "rank": {
+            "pass": true,
+            "value": 32067,
+            "threshold": 100000
+        },
+        "buybox": {
+            "pass": true,
+            "value": 44.41,
+            "threshold": 10
+        },
+        "amazon_pct": {
+            "pass": true,
+            "value": 0.0,
+            "threshold": 80
+        },
+        "monthly_sold": {
+            "pass": true,
+            "value": null
+        }
+    },
+    "computed_roi_pct": 249.71413160733553,
+    "supplier_cost": 9.27,
+    "buybox": 44.41,
+    "amazon_buybox_pct": 0.0,
+    "snapshot_at": "2026-07-15T06:05:32.831384Z"
+}

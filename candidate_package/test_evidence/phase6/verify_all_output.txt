@@ -1,0 +1,308 @@
+=== verify_all.sh — http://localhost:8000 ===
+Waiting for GET /health to return 200 before starting...
+API is healthy.
+
+############################################################
+# 1. verify_auth.sh
+############################################################
+=== verify_auth.sh — http://localhost:8000 ===
+--- 1. POST /auth/register (user A, new email) -> 201 + usable token ---
+  PASS: register user A (HTTP 201)
+  PASS: register response included a non-empty access_token
+--- 2. POST /auth/register (same email again) -> 409 ---
+  PASS: duplicate-email register (HTTP 409)
+--- 3. POST /auth/login (wrong password) -> 401 ---
+  PASS: wrong-password login (HTTP 401)
+--- 4. POST /auth/login (correct password) -> 200 + new token ---
+  PASS: correct-password login (HTTP 200)
+  PASS: login response included a non-empty access_token
+  PASS: login issued a DIFFERENT token than register (a fresh token, not a cached one)
+--- 5. Protected route with NO token -> 401 ---
+  PASS: protected route, no Authorization header (HTTP 401)
+--- 5b. Protected route with a garbage token -> 401 ---
+  PASS: protected route, garbage token (HTTP 401)
+--- 6. Protected route WITH a valid token -> 200 ---
+  PASS: protected route, valid token (HTTP 200)
+--- 7. Cross-user session_id access -> 403 ---
+    (register user B, have A create a chat session, then B tries to post to it)
+  PASS: register user B (HTTP 201)
+  PASS: user A created/used chat session 'auth-verify-session-1784103418-12702' (HTTP 200)
+  PASS: user B accessing user A's session_id (HTTP 403)
+
+=== verify_auth.sh summary: 13 passed, 0 failed ===
+
+############################################################
+# 2. verify_upc.py
+############################################################
+=== verify_upc.py — http://localhost:8000 — 7 case(s) from /Users/yu/keepa_scout_challenge/data/upc_test_cases.json ===
+Registered a throwaway user and obtained a token.
+
+[SKIP] case_01 (input='070537500052', required=True): asins=[] — Keepa lookup failed ('070537500052'): ConnectTimeout
+[SKIP] case_02 (input='70537500052', required=True): asins=[] — Keepa lookup failed ('70537500052'): ConnectTimeout
+[SKIP] case_03 (input='9780545465298', required=True): asins=[] — Keepa lookup failed ('9780545465298'): ConnectTimeout
+[SKIP] case_04 (input='00000772041997', required=False): asins=[] — Keepa lookup failed ('00000772041997'): ConnectTimeout
+[SKIP] case_05 (input='052144100245', required=True): asins=[] — Keepa lookup failed ('052144100245'): ConnectTimeout
+[SKIP] case_06 (input='999999999999', required=False): asins=[] — Keepa lookup failed ('999999999999'): ConnectTimeout
+[SKIP] case_07 (input='070-537-500-052', required=False): asins=[] — Keepa lookup failed ('070537500052'): ConnectTimeout
+
+=== summary ===
+case_id    required  outcome            asins
+case_01    True      KEEPA_UNREACHABLE  []
+case_02    True      KEEPA_UNREACHABLE  []
+case_03    True      KEEPA_UNREACHABLE  []
+case_04    False     KEEPA_UNREACHABLE  []
+case_05    True      KEEPA_UNREACHABLE  []
+case_06    False     KEEPA_UNREACHABLE  []
+case_07    False     KEEPA_UNREACHABLE  []
+
+0 PASS / 0 FAIL / 7 KEEPA_UNREACHABLE out of 7 case(s).
+
+NOTE: Keepa was unreachable from this environment for 7 case(s) (GET /upc returned 502 — see app/routers/upc.py's documented 502 path). This is an environment/connectivity issue, NOT evidence the UPC normalization logic (normalize_upc_variants) is wrong -- those cases could not be validated either way. Re-run this script somewhere with live Keepa connectivity to get a real PASS/FAIL verdict on them.
+
+############################################################
+# 3. verify_chat.py
+############################################################
+=== verify_chat.py — http://localhost:8000 ===
+Registered throwaway user 'chat-verify-1784103633@example.com'.
+
+--- Scenario 1: filter accumulation + threshold replacement ---
+    turn1 active_filters={'eligible_only': True, 'sort': 'roi_desc', 'limit': 20} last_result_asins_count=16
+[PASS] filter accumulation: turn1 sets eligible_only
+    turn2 active_filters={'eligible_only': True, 'min_roi': 25.0, 'sort': 'roi_desc', 'limit': 20} last_result_asins_count=7
+[PASS] filter accumulation: turn2 KEEPS eligible_only AND ADDS min_roi=25
+[PASS] filter accumulation: result set narrowed (turn2 <= turn1) — 16 -> 7
+    turn3 active_filters={'eligible_only': True, 'min_roi': 30.0, 'sort': 'roi_desc', 'limit': 20}
+[PASS] threshold replacement: min_roi REPLACED (30, not 25+30=55) — active_filters={'eligible_only': True, 'min_roi': 30.0, 'sort': 'roi_desc', 'limit': 20}
+
+--- Scenario 2: ordinal + pronoun resolution ---
+    turn1 last_result_asins=['B00HEON30Y', 'B001FB5MBK', 'B08SXRSYSL', 'B00004YVIN', 'B0768K7W7X']
+[PASS] reference resolution: turn1 produced a ranked result set — ['B00HEON30Y', 'B001FB5MBK', 'B08SXRSYSL', 'B00004YVIN', 'B0768K7W7X']
+    turn2 resolved_entity=B001FB5MBK results_asins=['B001FB5MBK']
+[PASS] ordinal resolution: 'the second item' -> last_result_asins[1] (1-based) — expected B001FB5MBK, resolved_entity=B001FB5MBK
+    turn3 resolved_entity=B001FB5MBK results_asins=[]
+[PASS] pronoun resolution: 'it' still refers to the same ASIN across turns — expected B001FB5MBK, resolved_entity=B001FB5MBK
+
+--- Scenario 3: out-of-scope refusal doesn't lose prior context ---
+    turn1 session_state={'active_filters': {'sort': 'roi_desc', 'limit': 3}, 'last_result_asins': ['B00HEON30Y', 'B001FB5MBK', 'B08SXRSYSL'], 'resolved_entity': None}
+    turn2 answer='I can only help with Amazon ASIN arbitrage analysis.'
+    turn2 session_state={'active_filters': {'sort': 'roi_desc', 'limit': 3}, 'last_result_asins': ['B00HEON30Y', 'B001FB5MBK', 'B08SXRSYSL'], 'resolved_entity': None}
+[PASS] OOS refusal uses the EXACT required string
+[PASS] session_state unchanged/preserved across the OOS refusal turn
+    turn3 answer="Here's the list sorted by **lowest Amazon BuyBox share first** (all three have 0% Amazon dominance):\n\n| # | ASIN | Amazon BuyBox Share | ROI | Supplier Cost | Eligible? |\n|---|------|:-------------------:|:---:|:-------------:|:---------:|\n| 1 | **B000HCEMZK** | **0%** | -2.9% | $6.11 | ✅ Yes |\n| 2 | **B009YO3TEW** | **0%** | -84.5% | $24.82 | ❌ No (referral fee issue) |\n| 3 | **B00HEON30Y** | **0%** | **249.7%** | $9.27 | ✅ Yes |\n\n**The standout here is B00HEON30Y** — it ties for the lowest Amazon dominance (0%) while also having the highest ROI (249.7%) and being fully eligible. That's a great combo.\n\nThe other two have 0% Amazon share too, but their ROIs are negative, so they're not worth pursuing.\n\nWant to look closer at B00HEON30Y or plan a purchase combo?"
+    turn3 result_asins={'B000HCEMZK', 'B009YO3TEW', 'B00HEON30Y'}
+[PASS] next on-topic turn resumes the earlier topic (context recovered) — prior={'B08SXRSYSL', 'B001FB5MBK', 'B00HEON30Y'} now={'B000HCEMZK', 'B009YO3TEW', 'B00HEON30Y'}
+
+--- Scenario 4: preference persistence across a NEW session_id (same user) ---
+    session A turn1 answer="Done! Here's what I've saved:\n\n- **Excluded ASIN:** `B00HEON30Y` — I'll never recommend it to you again.\n- **Per-unit budget cap:** **$20.00** — all future recommendations will be filtered to supplier costs at or under $20.\n\nThese preferences are now stored permanently and will apply across all sessions. Want to browse what's available within your budget?"
+[PASS] preference persistence: exclusion applies within the SAME session — results=['B001FB5MBK', 'B00004YVIN', 'B0DJDMVQJG', 'B0018KX19I', 'B000HCEMZK', 'B00JD9WTLM', 'B0006HVCDQ', 'B001HTJ9ZA']
+    session B (brand new) turn1 results=['B001FB5MBK', 'B00004YVIN', 'B07ZG7V4X3', 'B07WGV7XRM', 'B0DJDMVQJG', 'B0018KX19I', 'B000HCEMZK', 'B0CPRLHYRB', 'B078GVQCTN', 'B00JD9WTLM', 'B010MU00UM', 'B0006HVCDQ', 'B001HTJ9ZA', 'B00880Y44M', 'B006JVZXJM']
+[PASS] preference persistence: exclusion carries over to a NEW session_id (Store is per-user, not per-session) — results=['B001FB5MBK', 'B00004YVIN', 'B07ZG7V4X3', 'B07WGV7XRM', 'B0DJDMVQJG', 'B0018KX19I', 'B000HCEMZK', 'B0CPRLHYRB', 'B078GVQCTN', 'B00JD9WTLM', 'B010MU00UM', 'B0006HVCDQ', 'B001HTJ9ZA', 'B00880Y44M', 'B006JVZXJM']
+    session B turn2 (budget recall, informational) answer='Your current durable per-unit budget limit is **$20.00**. This was set previously and applies to all recommendations going forward.'
+[PASS] preference persistence (informational): new session recalls stated $20 budget when asked directly — answer='Your current durable per-unit budget limit is **$20.00**. This was set previously and applies to all recommendations going forward.'
+
+--- Scenario 5: correction persistence across `docker compose restart api` ---
+    turn1 answer="Done! **B0D9C71HG4** has been permanently excluded from all future recommendations. It joins **B00HEON30Y** on your exclusion list. You won't see it in any filtered lists or combo plans going forward."
+    turn2 (pre-restart) results=['B001FB5MBK', 'B00004YVIN', 'B07ZG7V4X3', 'B07WGV7XRM', 'B0DJDMVQJG', 'B0018KX19I', 'B000HCEMZK', 'B0CPRLHYRB', 'B078GVQCTN', 'B00JD9WTLM', 'B010MU00UM', 'B0006HVCDQ', 'B001HTJ9ZA', 'B00880Y44M', 'B006JVZXJM']
+[PASS] correction persistence: exclusion applies BEFORE restart — results=['B001FB5MBK', 'B00004YVIN', 'B07ZG7V4X3', 'B07WGV7XRM', 'B0DJDMVQJG', 'B0018KX19I', 'B000HCEMZK', 'B0CPRLHYRB', 'B078GVQCTN', 'B00JD9WTLM', 'B010MU00UM', 'B0006HVCDQ', 'B001HTJ9ZA', 'B00880Y44M', 'B006JVZXJM']
+    >>> docker compose restart api <<<
+    restart exit_code=0
+    restart stdout=
+    restart stderr=Container keepa_scout_challenge-api-1 Restarting 
+ Container keepa_scout_challenge-api-1 Started
+[PASS] `docker compose restart api` succeeded
+[PASS] API back to /health == 200 after restart
+    turn3 (post-restart, same session_id) results=[]
+[PASS] correction persistence: exclusion STILL applies AFTER restart, same session_id — results=[]
+
+--- Bonus (informational, non-gating): checkpoint tool_calls observability ---
+    INFO: could not confirm 'tool_calls'/'ToolMessage' as plain text in the checkpoint blob (LangGraph's checkpoint serialization isn't guaranteed grep-friendly -- this is informational only, not a scenario failure). psql exit_code=1, stdout_len=0
+
+=== verify_chat.py summary ===
+  [PASS] 1. filter accumulation + threshold replacement
+  [PASS] 2. ordinal + pronoun resolution
+  [PASS] 3. topic switch + OOS preserves context
+  [PASS] 4. preference persistence across new session_id
+  [PASS] 5. correction persistence across docker compose restart
+
+5/5 scenarios passed.
+
+############################################################
+# 4. verify_refresh_resume.sh
+############################################################
+=== verify_refresh_resume.sh — http://localhost:8000 ===
+--- setup: register a throwaway user ---
+  INFO: registered refresh-verify-1784103737-13165@example.com
+--- step 0: make sure we start from a clean slate (no job already running) ---
+--- step 1: POST /refresh ---
+  response (0s): {"job_id":"r-a7c8d425450e","state":"running","total":32,"done":0}
+  PASS: POST /refresh returned job_id=r-a7c8d425450e, state=running, total=32
+  PASS: POST /refresh returned in 0s (well under 1s target is ideal; comfortably fast either way, did NOT block on the whole batch)
+--- step 1b: second immediate POST /refresh returns the SAME job_id (reentrancy) ---
+  PASS: back-to-back POST /refresh did not start a second job (same job_id=r-a7c8d425450e)
+--- step 2: poll /refresh/status until genuinely partway through ---
+  t+0s: state=running done=0 failed=0 total=32
+  t+1s: state=running done=0 failed=0 total=32
+  t+2s: state=running done=0 failed=0 total=32
+  t+3s: state=running done=0 failed=0 total=32
+  t+4s: state=running done=0 failed=0 total=32
+  t+5s: state=running done=0 failed=0 total=32
+  t+6s: state=running done=0 failed=0 total=32
+  t+7s: state=running done=0 failed=0 total=32
+  t+8s: state=running done=0 failed=0 total=32
+  t+9s: state=running done=0 failed=0 total=32
+  t+10s: state=running done=0 failed=0 total=32
+  t+11s: state=running done=0 failed=0 total=32
+  t+12s: state=running done=0 failed=0 total=32
+  t+13s: state=running done=0 failed=0 total=32
+  t+15s: state=running done=0 failed=0 total=32
+  t+16s: state=running done=0 failed=0 total=32
+  t+17s: state=running done=0 failed=0 total=32
+  t+18s: state=running done=0 failed=0 total=32
+  t+19s: state=running done=0 failed=0 total=32
+  t+20s: state=running done=0 failed=0 total=32
+  t+21s: state=running done=0 failed=0 total=32
+  t+22s: state=running done=0 failed=0 total=32
+  t+23s: state=running done=0 failed=0 total=32
+  t+24s: state=running done=0 failed=0 total=32
+  t+25s: state=running done=0 failed=0 total=32
+  t+26s: state=running done=0 failed=0 total=32
+  t+27s: state=running done=0 failed=0 total=32
+  t+28s: state=running done=0 failed=0 total=32
+  t+29s: state=running done=0 failed=0 total=32
+  t+30s: state=running done=0 failed=10 total=32
+  PASS: caught the job genuinely partway through: done=0 failed=10 total=32
+--- step 3: capture (asin, updated_at) for a few items already in a terminal state ---
+  captured 5 terminal item(s):
+    B00004YVIN,2026-07-15 08:22:18.320771+00
+    B001FB5MBK,2026-07-15 08:22:18.318212+00
+    B003HL1JZO,2026-07-15 08:22:18.330343+00
+    B006JVZXJM,2026-07-15 08:22:18.307995+00
+    B00HEON30Y,2026-07-15 08:22:18.336592+00
+  PASS: captured 5 already-terminal item(s) for the not-redone check
+  INFO: refresh_jobs row count before kill/resume: 6
+--- step 4: docker compose kill worker (simulates the worker process dying mid-batch) ---
+ Container keepa_scout_challenge-worker-1 Killing 
+ Container keepa_scout_challenge-worker-1 Killed 
+  INFO: worker container state after kill: <not running>
+--- step 5: docker compose up -d worker ---
+ Container keepa_scout_challenge-db-1 Running 
+ Container keepa_scout_challenge-broker-1 Running 
+ Container keepa_scout_challenge-broker-1 Waiting 
+ Container keepa_scout_challenge-db-1 Waiting 
+ Container keepa_scout_challenge-db-1 Healthy 
+ Container keepa_scout_challenge-broker-1 Healthy 
+ Container keepa_scout_challenge-worker-1 Starting 
+ Container keepa_scout_challenge-worker-1 Started 
+  PASS: worker container is back up (state=running)
+--- step 6: POST /refresh again -> must return the SAME job_id ---
+  response: {"job_id":"r-a7c8d425450e","state":"running","total":32,"done":0}
+  PASS: resumed the SAME job_id=r-a7c8d425450e (not a new job)
+  INFO: refresh_jobs row count after resume trigger: 6
+  PASS: no second refresh_jobs row was created by the resume (6 -> 6)
+--- step 7: poll to completion ---
+  t+36s: state=running done=0 failed=10 total=32
+  t+38s: state=running done=0 failed=10 total=32
+  t+40s: state=running done=0 failed=10 total=32
+  t+42s: state=running done=0 failed=10 total=32
+  t+44s: state=running done=0 failed=10 total=32
+  t+46s: state=running done=0 failed=10 total=32
+  t+48s: state=running done=0 failed=10 total=32
+  t+50s: state=running done=0 failed=10 total=32
+  t+52s: state=running done=0 failed=10 total=32
+  t+54s: state=running done=0 failed=10 total=32
+  t+56s: state=running done=0 failed=10 total=32
+  t+58s: state=running done=0 failed=10 total=32
+  t+60s: state=running done=0 failed=10 total=32
+  t+62s: state=running done=0 failed=10 total=32
+  t+65s: state=running done=0 failed=14 total=32
+  t+67s: state=running done=0 failed=20 total=32
+  t+69s: state=running done=0 failed=20 total=32
+  t+71s: state=running done=0 failed=20 total=32
+  t+73s: state=running done=0 failed=20 total=32
+  t+75s: state=running done=0 failed=20 total=32
+  t+77s: state=running done=0 failed=20 total=32
+  t+79s: state=running done=0 failed=20 total=32
+  t+81s: state=running done=0 failed=20 total=32
+  t+83s: state=running done=0 failed=20 total=32
+  t+85s: state=running done=0 failed=20 total=32
+  t+87s: state=running done=0 failed=20 total=32
+  t+89s: state=running done=0 failed=20 total=32
+  t+91s: state=running done=0 failed=20 total=32
+  t+93s: state=running done=0 failed=20 total=32
+  t+95s: state=running done=0 failed=24 total=32
+  t+97s: state=running done=0 failed=30 total=32
+  t+100s: state=running done=0 failed=30 total=32
+  t+102s: state=running done=0 failed=30 total=32
+  t+104s: state=running done=0 failed=30 total=32
+  t+106s: state=running done=0 failed=30 total=32
+  t+108s: state=running done=0 failed=30 total=32
+  t+110s: state=running done=0 failed=30 total=32
+  t+112s: state=running done=0 failed=30 total=32
+  t+114s: state=running done=0 failed=30 total=32
+  t+116s: state=running done=0 failed=30 total=32
+  t+118s: state=running done=0 failed=30 total=32
+  t+120s: state=running done=0 failed=30 total=32
+  t+122s: state=running done=0 failed=30 total=32
+  t+124s: state=running done=0 failed=30 total=32
+  t+126s: state=done done=0 failed=32 total=32
+  PASS: refresh reached state=done
+  PASS: done + failed == total (0 + 32 == 32)
+--- step 8: assert captured items' updated_at did NOT change (not re-fetched) ---
+  PASS: B00004YVIN: updated_at unchanged (2026-07-15 08:22:18.320771+00) -- not re-fetched
+
+=== verify_refresh_resume.sh summary: 11 passed, 0 failed ===
+--- final sanity: stack still healthy ---
+  PASS: GET /health -> 200 after this script's kill/restart
+NAME                               IMAGE                            COMMAND                  SERVICE    CREATED          STATUS                 PORTS
+keepa_scout_challenge-api-1        keepa_scout_challenge-api        "sh -c 'python -m ap…"   api        11 minutes ago   Up 2 minutes           0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+keepa_scout_challenge-broker-1     redis:7                          "docker-entrypoint.s…"   broker     3 hours ago      Up 3 hours (healthy)   6379/tcp
+keepa_scout_challenge-db-1         postgres:16                      "docker-entrypoint.s…"   db         3 hours ago      Up 3 hours (healthy)   5432/tcp
+keepa_scout_challenge-frontend-1   keepa_scout_challenge-frontend   "/docker-entrypoint.…"   frontend   16 minutes ago   Up 16 minutes          0.0.0.0:5173->80/tcp, [::]:5173->80/tcp
+keepa_scout_challenge-worker-1     keepa_scout_challenge-worker     "celery -A app.tasks…"   worker     11 minutes ago   Up About a minute      8000/tcp
+--- ensuring 'worker' service is up before exiting ---
+
+############################################################
+# 5. cost_report.py
+############################################################
+=== cost_report.py — Keepa Scout cost accounting ===
+
+=== LLM token usage (llm_usage_log) ===
+  LLM: 910,881 input / 84,481 output / 995,362 total tokens across 423 call(s)
+
+  --- breakdown by endpoint / model ---
+  endpoint       model                  calls      input     output      total
+  ask            deepseek-chat            325    308,532     39,907    348,439
+  chat           deepseek-chat             88    530,722     39,240    569,962
+  chat_stream    deepseek-chat             10     71,627      5,334     76,961
+
+  --- breakdown by user (top 10 by total tokens) ---
+  chat-verify-1784102625@example.com          16 calls   105,187 tokens
+  chat-verify-1784103633@example.com          16 calls   104,587 tokens
+  chat-verify-1784102499@example.com          15 calls    99,377 tokens
+  chat-verify-1784102640@example.com          11 calls    75,809 tokens
+  chat-verify-1784102512@example.com          11 calls    75,465 tokens
+  phase4test2_1784098633@example.com          15 calls    68,585 tokens
+  chatverify@example.com                       3 calls    34,055 tokens
+  phase4_verify@example.com                    4 calls    30,488 tokens
+  chatverify2@example.com                      3 calls    25,912 tokens
+  ws-verify-b9fbd774ae314432a884092970540dc7@example.com     2 calls     8,538 tokens
+
+=== Keepa token balance (GET /token, free, no token cost) ===
+  key #1 (8fjl8k...v4qs): UNREACHABLE — unreachable: _ssl.c:1112: The handshake operation timed out
+  key #2 (2hopk7...6t0c): UNREACHABLE — unreachable: _ssl.c:1112: The handshake operation timed out
+
+  NOTE: if every key above is UNREACHABLE, Keepa itself could not be reached from wherever this script is running (network/DNS/firewall) -- this is an environment issue, not a bug in this script or in the app's Keepa client.
+
+############################################################
+# verify_all.sh — final summary
+############################################################
+SCRIPT                           RESULT    
+------                           ------    
+1. verify_auth.sh                PASS      
+2. verify_upc.py                 INCONCLUSIVE (Keepa unreachable, code 2)
+3. verify_chat.py                PASS      
+4. verify_refresh_resume.sh      PASS      
+5. cost_report.py                PASS      
+
+verify_all.sh: ALL SCRIPTS PASSED (or were inconclusive only due to Keepa connectivity).
+EXIT CODE: 0

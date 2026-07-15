@@ -1,0 +1,6 @@
+
+tests/test_tool_run_readonly_sql.py::test_run_readonly_sql_impl_executes_legit_select
+  sys:1: SAWarning: transaction already deassociated from connection
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+195 passed, 43 warnings in 78.48s (0:01:18)

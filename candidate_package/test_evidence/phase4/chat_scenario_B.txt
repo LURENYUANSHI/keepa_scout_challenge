@@ -1,0 +1,25 @@
+=== turn 1: top asins ===
+answer: Here are the **top 3 ASINs by ROI**:
+
+| # | ASIN | ROI | Supplier Cost | BuyBox Price | Amazon BuyBox Share | Eligible? |
+|---|------|:---:|:-------------:|:------------:|:-------------------:|:------
+last_result_asins: ['B00HEON30Y', 'B001FB5MBK', 'B08SXRSYSL']
+=== turn 2: pronoun/ordinal ===
+answer: Here's the full breakdown for **B001FB5MBK** — the #2 ASIN by ROI:
+
+---
+
+### 📊 Key Metrics
+| Metric | Value |
+|--------|:-----:|
+| **ROI** | **213.6%** |
+| **Supplier Cost** | $17.09 |
+| **BuyBox Price** | $63.54 |
+| **Amazon BuyBox Share** | 25.2% |
+| **Sales Rank** | #5,240 |
+| **Monthly Sales** | ~288 units |
+| **Eligible?** | ✅ Yes |
+
+### ⚠️ Price Anomaly Detected
+The current BuyBox price of *
+resolved_entity: B001FB5MBK

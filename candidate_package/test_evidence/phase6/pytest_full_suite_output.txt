@@ -1,0 +1,28 @@
+ Container keepa_scout_challenge-broker-1 Running 
+ Container keepa_scout_challenge-db-1 Running 
+ Container keepa_scout_challenge-db-1 Waiting 
+ Container keepa_scout_challenge-broker-1 Waiting 
+ Container keepa_scout_challenge-broker-1 Healthy 
+ Container keepa_scout_challenge-db-1 Healthy 
+ Container keepa_scout_challenge-api-run-75995dd4ede4 Creating 
+ Container keepa_scout_challenge-api-run-75995dd4ede4 Created 
+  tests/test_tool_run_readonly_sql.py:57: PytestWarning: The test <Function test_select_referencing_updated_at_style_column_is_not_a_false_positive> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_select_referencing_updated_at_style_column_is_not_a_false_positive():
+
+tests/test_tool_run_readonly_sql.py::test_trailing_semicolon_alone_is_tolerated
+  tests/test_tool_run_readonly_sql.py:63: PytestWarning: The test <Function test_trailing_semicolon_alone_is_tolerated> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_trailing_semicolon_alone_is_tolerated():
+
+tests/test_tool_run_readonly_sql.py::test_empty_sql_is_rejected
+  tests/test_tool_run_readonly_sql.py:67: PytestWarning: The test <Function test_empty_sql_is_rejected> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_empty_sql_is_rejected():
+
+tests/test_tool_run_readonly_sql.py::test_non_select_statement_is_rejected
+  tests/test_tool_run_readonly_sql.py:72: PytestWarning: The test <Function test_non_select_statement_is_rejected> is marked with '@pytest.mark.asyncio' but it is not an async function. Please remove the asyncio mark. If the test is not marked explicitly, check for global marks applied via 'pytestmark'.
+    def test_non_select_statement_is_rejected():
+
+tests/test_tool_run_readonly_sql.py::test_run_readonly_sql_impl_executes_legit_select
+  sys:1: SAWarning: transaction already deassociated from connection
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+199 passed, 45 warnings in 71.12s (0:01:11)

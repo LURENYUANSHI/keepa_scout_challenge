@@ -1,0 +1,20 @@
+=== register ===
+{"access_token":"VqdMfBljdozTIM7WC0UHoaRqgr9gBmHulsr9Q4SzZKA","expires_at":"2026-07-16T05:39:24.554126Z"}
+HTTP_STATUS:201
+=== duplicate register ===
+{"detail":"Email already registered."}
+HTTP_STATUS:409
+=== login wrong password ===
+{"detail":"Invalid email or password."}
+HTTP_STATUS:401
+=== login correct ===
+{"access_token":"_tpW5nznLNm36Kzaj9SlA5IPuNsBUwwcNnb6XIFHp3o","expires_at":"2026-07-16T05:39:24.928571Z"}
+=== whoami no token ===
+{"detail":"Missing or invalid authentication token."}
+HTTP_STATUS:401
+=== whoami valid token ===
+{"user_id":"2b5f1ca2-fdac-4ffb-a1bd-2b3b6b39cd8f"}
+HTTP_STATUS:200
+=== whoami garbage token ===
+{"detail":"Missing or invalid authentication token."}
+HTTP_STATUS:401

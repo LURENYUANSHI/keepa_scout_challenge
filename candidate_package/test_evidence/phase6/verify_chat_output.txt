@@ -1,0 +1,7 @@
+=== verify_chat.py — http://localhost:8000 ===
+Registered throwaway user 'chat-verify-1784103185@example.com'.
+
+--- Scenario 1: filter accumulation + threshold replacement ---
+    turn1 active_filters={'eligible_only': True, 'sort': 'roi_desc', 'limit': 20} last_result_asins_count=16
+[PASS] filter accumulation: turn1 sets eligible_only
+FATAL: POST /chat (session='chat-verify-accum-1784103185', message='Now narrow that down further to only ones with ROI above 25 percent.') returned HTTP 0: Remote end closed connection without response

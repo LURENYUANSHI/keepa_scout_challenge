@@ -1,0 +1,72 @@
+ Container keepa_scout_challenge-broker-1 Running 
+ Container keepa_scout_challenge-db-1 Running 
+ Container keepa_scout_challenge-broker-1 Waiting 
+ Container keepa_scout_challenge-db-1 Waiting 
+ Container keepa_scout_challenge-db-1 Healthy 
+ Container keepa_scout_challenge-broker-1 Healthy 
+ Container keepa_scout_challenge-api-run-4849bea6ef89 Creating 
+ Container keepa_scout_challenge-api-run-4849bea6ef89 Created 
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-8.4.2, pluggy-1.6.0 -- /usr/local/bin/python3.11
+cachedir: .pytest_cache
+rootdir: /app
+configfile: pytest.ini
+plugins: respx-0.23.1, anyio-4.14.2, asyncio-0.26.0
+asyncio: mode=Mode.AUTO, asyncio_default_fixture_loop_scope=session, asyncio_default_test_loop_scope=session
+collecting ... collected 53 items
+
+tests/test_eligibility_rules.py::test_compute_payout_example_1 PASSED    [  1%]
+tests/test_eligibility_rules.py::test_compute_payout_example_2 PASSED    [  3%]
+tests/test_eligibility_rules.py::test_compute_payout_example_3 PASSED    [  5%]
+tests/test_eligibility_rules.py::test_compute_roi_example_1 PASSED       [  7%]
+tests/test_eligibility_rules.py::test_compute_roi_example_2 PASSED       [  9%]
+tests/test_eligibility_rules.py::test_compute_roi_example_3 PASSED       [ 11%]
+tests/test_eligibility_rules.py::test_compute_roi_zero_cost_returns_none PASSED [ 13%]
+tests/test_eligibility_rules.py::test_compute_roi_n_items_zero_treated_as_one PASSED [ 15%]
+tests/test_eligibility_rules.py::test_check_eligibility_fully_eligible PASSED [ 16%]
+tests/test_eligibility_rules.py::test_check_eligibility_fails_rule1_referral_fee PASSED [ 18%]
+tests/test_eligibility_rules.py::test_check_eligibility_fails_rule1_referral_fee_zero PASSED [ 20%]
+tests/test_eligibility_rules.py::test_check_eligibility_fails_rule2_rank_and_no_demand_exemption PASSED [ 22%]
+tests/test_eligibility_rules.py::test_check_eligibility_fails_rule3_buybox_too_low PASSED [ 24%]
+tests/test_eligibility_rules.py::test_check_eligibility_fails_rule4_amazon_dominance PASSED [ 26%]
+tests/test_eligibility_rules.py::test_check_eligibility_fails_rule5_monthly_sold_below_threshold PASSED [ 28%]
+tests/test_eligibility_rules.py::test_check_eligibility_demand_exemption_overrides_bad_rank PASSED [ 30%]
+tests/test_keepa_parse.py::test_keepa_time_to_datetime_epoch_zero PASSED [ 32%]
+tests/test_keepa_parse.py::test_keepa_time_to_datetime_known_value PASSED [ 33%]
+tests/test_keepa_parse.py::test_keepa_time_to_datetime_is_utc_aware PASSED [ 35%]
+tests/test_keepa_parse.py::test_safe_value_minus_one_is_none PASSED      [ 37%]
+tests/test_keepa_parse.py::test_safe_value_none_is_none PASSED           [ 39%]
+tests/test_keepa_parse.py::test_safe_value_real_value_passthrough PASSED [ 41%]
+tests/test_keepa_parse.py::test_cents_to_dollars_minus_one_is_none PASSED [ 43%]
+tests/test_keepa_parse.py::test_cents_to_dollars_none_is_none PASSED     [ 45%]
+tests/test_keepa_parse.py::test_cents_to_dollars_real_value PASSED       [ 47%]
+tests/test_keepa_parse.py::test_extract_current_buybox_from_stats_current PASSED [ 49%]
+tests/test_keepa_parse.py::test_extract_current_buybox_minus_one_is_none PASSED [ 50%]
+tests/test_keepa_parse.py::test_extract_current_buybox_missing_stats_is_none PASSED [ 52%]
+tests/test_keepa_parse.py::test_extract_sales_rank_from_stats_current PASSED [ 54%]
+tests/test_keepa_parse.py::test_extract_sales_rank_minus_one_is_none PASSED [ 56%]
+tests/test_keepa_parse.py::test_extract_referral_fee_pct_prefers_new_field PASSED [ 58%]
+tests/test_keepa_parse.py::test_extract_referral_fee_pct_falls_back_to_deprecated PASSED [ 60%]
+tests/test_keepa_parse.py::test_extract_referral_fee_pct_minus_one_is_none PASSED [ 62%]
+tests/test_keepa_parse.py::test_extract_fba_pick_pack_cents_normal PASSED [ 64%]
+tests/test_keepa_parse.py::test_extract_fba_pick_pack_cents_missing_fbafees_key PASSED [ 66%]
+tests/test_keepa_parse.py::test_extract_fba_pick_pack_cents_minus_one PASSED [ 67%]
+tests/test_keepa_parse.py::test_extract_monthly_sold_present PASSED      [ 69%]
+tests/test_keepa_parse.py::test_extract_monthly_sold_missing_is_none PASSED [ 71%]
+tests/test_keepa_parse.py::test_extract_monthly_sold_minus_one_is_none PASSED [ 73%]
+tests/test_keepa_parse.py::test_extract_amazon_buybox_pct_missing_field_is_none PASSED [ 75%]
+tests/test_keepa_parse.py::test_extract_amazon_buybox_pct_single_entry_is_none PASSED [ 77%]
+tests/test_keepa_parse.py::test_extract_amazon_buybox_pct_closed_window_known_percentage PASSED [ 79%]
+tests/test_keepa_parse.py::test_extract_amazon_buybox_pct_all_amazon PASSED [ 81%]
+tests/test_keepa_parse.py::test_extract_amazon_buybox_pct_never_amazon PASSED [ 83%]
+tests/test_keepa_client.py::test_get_products_batches_over_100_asins PASSED [ 84%]
+tests/test_keepa_client.py::test_get_products_single_batch_for_small_list PASSED [ 86%]
+tests/test_keepa_client.py::test_get_products_by_code_uses_code_param_not_asin PASSED [ 88%]
+tests/test_keepa_client.py::test_get_products_rejects_both_asins_and_code PASSED [ 90%]
+tests/test_keepa_client.py::test_402_triggers_key_rotation_to_second_key PASSED [ 92%]
+tests/test_keepa_client.py::test_all_keys_exhausted_raises PASSED        [ 94%]
+tests/test_keepa_client.py::test_429_triggers_retry_then_succeeds PASSED [ 96%]
+tests/test_keepa_client.py::test_429_exhausts_retries_and_raises PASSED  [ 98%]
+tests/test_keepa_client.py::test_get_token_status_hits_free_endpoint PASSED [100%]
+
+============================== 53 passed in 0.05s ==============================

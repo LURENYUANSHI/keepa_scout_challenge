@@ -1,0 +1,132 @@
+=== verify_refresh_resume.sh — http://localhost:8000 ===
+--- setup: register a throwaway user ---
+  INFO: registered refresh-verify-1784103229-11211@example.com
+--- step 0: make sure we start from a clean slate (no job already running) ---
+--- step 1: POST /refresh ---
+  response (0s): {"job_id":"r-06780f56c6ad","state":"running","total":32,"done":0}
+  PASS: POST /refresh returned job_id=r-06780f56c6ad, state=running, total=32
+  PASS: POST /refresh returned in 0s (well under 1s target is ideal; comfortably fast either way, did NOT block on the whole batch)
+--- step 1b: second immediate POST /refresh returns the SAME job_id (reentrancy) ---
+  PASS: back-to-back POST /refresh did not start a second job (same job_id=r-06780f56c6ad)
+--- step 2: poll /refresh/status until genuinely partway through ---
+  t+0s: state=running done=0 failed=0 total=32
+  t+1s: state=running done=0 failed=0 total=32
+  t+2s: state=running done=0 failed=0 total=32
+  t+3s: state=running done=0 failed=0 total=32
+  t+4s: state=running done=0 failed=0 total=32
+  t+5s: state=running done=0 failed=0 total=32
+  t+6s: state=running done=0 failed=0 total=32
+  t+7s: state=running done=0 failed=0 total=32
+  t+8s: state=running done=0 failed=0 total=32
+  t+9s: state=running done=0 failed=0 total=32
+  t+10s: state=running done=0 failed=0 total=32
+  t+11s: state=running done=0 failed=0 total=32
+  t+12s: state=running done=0 failed=0 total=32
+  t+13s: state=running done=0 failed=0 total=32
+  t+14s: state=running done=0 failed=0 total=32
+  t+15s: state=running done=0 failed=0 total=32
+  t+16s: state=running done=0 failed=0 total=32
+  t+17s: state=running done=0 failed=0 total=32
+  t+19s: state=running done=0 failed=0 total=32
+  t+20s: state=running done=0 failed=0 total=32
+  t+21s: state=running done=0 failed=0 total=32
+  t+22s: state=running done=0 failed=0 total=32
+  t+23s: state=running done=0 failed=0 total=32
+  t+24s: state=running done=0 failed=0 total=32
+  t+25s: state=running done=0 failed=0 total=32
+  t+26s: state=running done=0 failed=0 total=32
+  t+27s: state=running done=0 failed=0 total=32
+  t+28s: state=running done=0 failed=0 total=32
+  t+29s: state=running done=0 failed=0 total=32
+  t+30s: state=running done=0 failed=10 total=32
+  PASS: caught the job genuinely partway through: done=0 failed=10 total=32
+--- step 3: capture (asin, updated_at) for a few items already in a terminal state ---
+  captured 5 terminal item(s):
+    B00004YVIN,2026-07-15 08:13:50.183986+00
+    B001FB5MBK,2026-07-15 08:13:50.185245+00
+    B003HL1JZO,2026-07-15 08:13:50.173212+00
+    B006JVZXJM,2026-07-15 08:13:50.174303+00
+    B00HEON30Y,2026-07-15 08:13:50.174123+00
+  PASS: captured 5 already-terminal item(s) for the not-redone check
+  INFO: refresh_jobs row count before kill/resume: 5
+--- step 4: docker compose kill worker (simulates the worker process dying mid-batch) ---
+ Container keepa_scout_challenge-worker-1 Killing 
+ Container keepa_scout_challenge-worker-1 Killed 
+  INFO: worker container state after kill: <not running>
+--- step 5: docker compose up -d worker ---
+ Container keepa_scout_challenge-broker-1 Running 
+ Container keepa_scout_challenge-db-1 Running 
+ Container keepa_scout_challenge-broker-1 Waiting 
+ Container keepa_scout_challenge-db-1 Waiting 
+ Container keepa_scout_challenge-broker-1 Healthy 
+ Container keepa_scout_challenge-db-1 Healthy 
+ Container keepa_scout_challenge-worker-1 Starting 
+ Container keepa_scout_challenge-worker-1 Started 
+  PASS: worker container is back up (state=running)
+--- step 6: POST /refresh again -> must return the SAME job_id ---
+  response: {"job_id":"r-06780f56c6ad","state":"running","total":32,"done":0}
+  PASS: resumed the SAME job_id=r-06780f56c6ad (not a new job)
+  INFO: refresh_jobs row count after resume trigger: 5
+  PASS: no second refresh_jobs row was created by the resume (5 -> 5)
+--- step 7: poll to completion ---
+  t+36s: state=running done=0 failed=10 total=32
+  t+38s: state=running done=0 failed=10 total=32
+  t+40s: state=running done=0 failed=10 total=32
+  t+42s: state=running done=0 failed=10 total=32
+  t+44s: state=running done=0 failed=10 total=32
+  t+46s: state=running done=0 failed=10 total=32
+  t+48s: state=running done=0 failed=10 total=32
+  t+50s: state=running done=0 failed=10 total=32
+  t+52s: state=running done=0 failed=10 total=32
+  t+54s: state=running done=0 failed=10 total=32
+  t+56s: state=running done=0 failed=10 total=32
+  t+58s: state=running done=0 failed=10 total=32
+  t+60s: state=running done=0 failed=10 total=32
+  t+62s: state=running done=0 failed=10 total=32
+  t+64s: state=running done=0 failed=14 total=32
+  t+66s: state=running done=0 failed=20 total=32
+  t+68s: state=running done=0 failed=20 total=32
+  t+70s: state=running done=0 failed=20 total=32
+  t+72s: state=running done=0 failed=20 total=32
+  t+75s: state=running done=0 failed=20 total=32
+  t+77s: state=running done=0 failed=20 total=32
+  t+79s: state=running done=0 failed=20 total=32
+  t+81s: state=running done=0 failed=20 total=32
+  t+83s: state=running done=0 failed=20 total=32
+  t+85s: state=running done=0 failed=20 total=32
+  t+87s: state=running done=0 failed=20 total=32
+  t+89s: state=running done=0 failed=20 total=32
+  t+91s: state=running done=0 failed=20 total=32
+  t+93s: state=running done=0 failed=20 total=32
+  t+95s: state=running done=0 failed=24 total=32
+  t+97s: state=running done=0 failed=30 total=32
+  t+99s: state=running done=0 failed=30 total=32
+  t+101s: state=running done=0 failed=30 total=32
+  t+103s: state=running done=0 failed=30 total=32
+  t+105s: state=running done=0 failed=30 total=32
+  t+107s: state=running done=0 failed=30 total=32
+  t+109s: state=running done=0 failed=30 total=32
+  t+111s: state=running done=0 failed=30 total=32
+  t+113s: state=running done=0 failed=30 total=32
+  t+115s: state=running done=0 failed=30 total=32
+  t+118s: state=running done=0 failed=30 total=32
+  t+120s: state=running done=0 failed=30 total=32
+  t+122s: state=running done=0 failed=30 total=32
+  t+124s: state=running done=0 failed=30 total=32
+  t+126s: state=done done=0 failed=32 total=32
+  PASS: refresh reached state=done
+  PASS: done + failed == total (0 + 32 == 32)
+--- step 8: assert captured items' updated_at did NOT change (not re-fetched) ---
+  PASS: B00004YVIN: updated_at unchanged (2026-07-15 08:13:50.183986+00) -- not re-fetched
+
+=== verify_refresh_resume.sh summary: 11 passed, 0 failed ===
+--- final sanity: stack still healthy ---
+  PASS: GET /health -> 200 after this script's kill/restart
+NAME                               IMAGE                            COMMAND                  SERVICE    CREATED         STATUS                 PORTS
+keepa_scout_challenge-api-1        keepa_scout_challenge-api        "sh -c 'python -m ap…"   api        2 minutes ago   Up 2 minutes           0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+keepa_scout_challenge-broker-1     redis:7                          "docker-entrypoint.s…"   broker     3 hours ago     Up 3 hours (healthy)   6379/tcp
+keepa_scout_challenge-db-1         postgres:16                      "docker-entrypoint.s…"   db         3 hours ago     Up 3 hours (healthy)   5432/tcp
+keepa_scout_challenge-frontend-1   keepa_scout_challenge-frontend   "/docker-entrypoint.…"   frontend   8 minutes ago   Up 8 minutes           0.0.0.0:5173->80/tcp, [::]:5173->80/tcp
+keepa_scout_challenge-worker-1     keepa_scout_challenge-worker     "celery -A app.tasks…"   worker     2 minutes ago   Up About a minute      8000/tcp
+--- ensuring 'worker' service is up before exiting ---
+EXIT CODE: 0

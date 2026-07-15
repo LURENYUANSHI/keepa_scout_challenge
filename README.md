@@ -1,91 +1,140 @@
-# Keepa Scout — 笔试题
+# Keepa Scout
 
-本仓库包含一份 AI 全栈工程师岗位的笔试题。完整任务说明、交付要求、评分标准
-与示例交互都在 `candidate_package/` 下。请先阅读：
+Amazon 套利分析服务：ASIN eligibility/ROI 判定、Keepa 数据 ETL、自然语言问答（`/ask`）、
+多轮上下文 AI 助手（`/chat`，LangGraph 驱动）、后台全量刷新（`/refresh`，Celery + 每日定时）。
 
-> [`candidate_package/CHALLENGE.md`](candidate_package/CHALLENGE.md)
-
-附加资料：
-
-- [`candidate_package/KEEPA_QUICKSTART.md`](candidate_package/KEEPA_QUICKSTART.md) — Keepa API 起手包
-- [`candidate_package/env.example`](candidate_package/env.example) — 环境变量模板（含已分配的 Keepa keys）
-- [`candidate_package/Dockerfile.example`](candidate_package/Dockerfile.example) — 参考 Dockerfile
-- [`candidate_package/docker-compose.example.yml`](candidate_package/docker-compose.example.yml) — 参考 docker-compose
-- [`candidate_package/data/sample_asins.csv`](candidate_package/data/sample_asins.csv) — 32 个 ASIN，ETL 输入
-- [`candidate_package/data/upc_test_cases.json`](candidate_package/data/upc_test_cases.json) — 7 个 UPC 测试输入
+设计文档：[`ARCHITECTURE.md`](ARCHITECTURE.md)（系统架构/ER/时序图）、
+[`HARNESS.md`](HARNESS.md)（每项能力的目标/验收标准/证据）。笔试题原始材料在
+[`candidate_package/`](candidate_package/CHALLENGE.md)。
 
 ## 启动
 
 ```bash
-# 1. 克隆本仓库
-git clone <本仓库 URL> && cd keepa_scout_challenge
+cp .env.example .env
+# .env 里已经填好这个环境用的 DeepSeek key；换成你自己的 LLM key/供应商也可以，
+# 只要是 OpenAI 兼容接口，改 LLM_BASE_URL/LLM_MODEL 就行，不用改代码。
+# Keepa key 从 candidate_package/env.example 复制。
 
-# 2. 在你自己的工作目录里准备 .env（Keepa key 已经在里面）
-cp candidate_package/env.example .env
-# 编辑 .env，按需填入你的 LLM key
-
-# 3. 写你的实现。参考 Dockerfile.example / docker-compose.example.yml，
-#    但请按你的实现改名为 Dockerfile / docker-compose.yml。
-
-# 4. 起服务
-docker compose up --build
+docker compose up --build -d
+# api(:8000) / worker / beat(每天 04:00 UTC 定时刷新) / db(Postgres) / broker(Redis) / frontend(:5173)
+# ETL 在 api 容器启动时自动跑一次(python -m app.etl)，读 data/sample_asins.csv
 ```
 
-LLM 服务商任选 —— 海外（OpenAI / Anthropic / Gemini）或国内（DeepSeek /
-Moonshot Kimi / 通义千问 Qwen / 智谱 GLM / 豆包 / Yi）都可以。
+一键跑全部验收：
 
-提交窗口：**72 小时**。
+```bash
+./scripts/verify_all.sh
+```
 
-## 提交方式
+题目要求的两个验收脚本可以单独跑：`./scripts/verify_chat.py`（`/chat` 多轮场景，
+含真实 `docker compose restart api`）、`./scripts/verify_refresh_resume.sh`（`/refresh`
+断点续跑，含真实 `docker compose kill worker`）。
 
-回复原邮件，附上：
+**已知环境限制**：本仓库开发/验证过程中所在的沙箱连不上 `api.keepa.com`（DNS 解析到
+一个网络测试用的哨兵地址，不是本项目的 bug）。所以下面 `/upc`、ETL 的真实 Keepa 数据是
+在具备正常网络的环境下才能验证；本仓库里跑的所有 `/eligibility`/`/ask`/`/chat` 示例，
+底层数据是一批**灌进真实 ETL 管线（`app/ingest.py`）的合成 fixture**（不是手造的假 JSON
+响应），标题带 "Synthetic Dev Fixture Item" 字样可辨认。DeepSeek（LLM）在这个环境里是能
+连通的，所有 `/ask`/`/chat` 示例都是真实模型调用产生的结果，不是 mock。
 
-1. **Git 仓库 URL**（公开 GitHub / GitLab，commit 历史颗粒度合理）
-2. **Loom 视频链接** —— ≤ 5 分钟，必须同时有摄像头画面 + 屏幕录制
-3. 简要说明你完成了哪些部分，以及如果有更多时间还会做什么
+## 鉴权（强制，无匿名回退——见 ARCHITECTURE.md 顶部说明）
 
-（仓库内必交的 `README.md` / `REPORT.md` / `TIMELINE.md` 清单见
-`candidate_package/CHALLENGE.md` 的"交付清单"。）
+```bash
+curl -X POST localhost:8000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"correcthorse"}'
+# -> {"access_token":"...","expires_at":"..."}  (24h 有效，注册即自动登录)
 
-## Docker
+TOKEN=<上面拿到的 access_token>
+```
 
-**必须项**：你的提交需要能用 `docker compose up --build` 一键起来，对外暴露
-`:8000` 上的 6 个必做 endpoint。
+下面所有端点都要带 `-H "Authorization: Bearer $TOKEN"`。
 
-- `Dockerfile.example` 和 `docker-compose.example.yml` 是参考起点
-- 这两个文件是 SQLite 路线的最小版本；如果你用 Postgres 自己加 `db` 服务
-- 你的 `.env` 文件要被 `docker-compose.yml` 读到（参考 example 里的 `env_file:`）
-- ETL 应该在容器启动时自动跑（参考 example 里 CMD 的 `python -m app.etl &&` 部分）
+## 端点
 
-## CI（可选，不强制）
+### `GET /upc`
 
-不要求做 CI。但如果你愿意加一个 GitHub Actions 工作流验证 `docker compose up`
-能 boot + 每个端点能响应，**算加分项**（说明你有自动化意识）。
+```bash
+curl "localhost:8000/upc?upc=70537500052" -H "Authorization: Bearer $TOKEN"
+# -> {"input":"70537500052","normalized":["70537500052","070537500052"],"asins":[...]}
+```
 
-如果做：
+### `GET /eligibility/{asin}`
 
-- 放在 `.github/workflows/`（仓库根目录下）
-- secrets 在 GitHub Settings → Secrets and variables → Actions 里配 
-- 跑 `docker compose up -d`，curl 每个端点验证返回 2xx
-- 不用真打 Keepa（可以用 mock 或者直接验证 /health 上来就行）
+```bash
+curl localhost:8000/eligibility/B00HEON30Y -H "Authorization: Bearer $TOKEN"
+```
 
-我们不会因为你**没做** CI 而扣分，但做了会让我们对你的工程习惯印象更好。
+### `POST /eligibility/batch`（加分项）
 
-## 时间预算
+```bash
+curl -X POST localhost:8000/eligibility/batch -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"asins":["B00HEON30Y","DOES_NOT_EXIST","B001FB5MBK"]}'
+# 按输入顺序返回；查不到的项是 {"asin":"DOES_NOT_EXIST","error":"not_found"}，不是 500
+```
 
-整个任务设计为在 **≤ 4 小时** 内完成（可以使用 Claude Code / Cursor /
-Copilot 等 AI 辅助工具）。如果 4 小时内做不完也没关系，提交已完成的部分，
-在 `REPORT.md` 中说明剩下的计划即可。
+### `POST /refresh` + `GET /refresh/status`
 
-## 关于 AI 工具
+```bash
+curl -X POST localhost:8000/refresh -H "Authorization: Bearer $TOKEN"
+# -> {"job_id":"...","state":"running","total":32,"done":0}
+curl localhost:8000/refresh/status -H "Authorization: Bearer $TOKEN"
+```
 
-允许使用 Claude Code / Cursor / Copilot / ChatGPT 等任何 AI 工具。但请注意：
+### `POST /ask`
 
-- Loom 视频中你需要能讲清楚仓库里**每一个文件**做什么。如果你对某段代码
-  讲不清，我们能看出来。
-- 在 `REPORT.md` 中如实写明：用了哪些 AI 工具、哪个模型、哪些代码是你
-  让 AI 生成的、哪些是你自己写或改的。
-- 请保留开发过程中的真实工作文件（`CLAUDE.md` / `AGENTS.md` / `.claude/` /
-  spec / 临时脚本等），不要在提交前清理。
+5 条真实跑过的示例（[`scripts/verify_chat.py`](scripts/verify_chat.py) 和开发过程里都
+实测过，非题目原句的复述）：
 
-我们希望招的是能驾驭这些工具、并对自己的工程判断负责的人。
+```bash
+curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"question":"How many ASINs currently pass all the eligibility checks?"}'
+
+curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"question":"Give me the 5 best-ROI ASINs where Amazon is not the dominant seller."}'
+
+curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"question":"Why doesn'\''t B006JVZXJM qualify as eligible?"}'
+
+curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"question":"If you had to pick one ASIN to resell right now, which would it be and why?"}'
+
+curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d '{"question":"What'\''s the weather forecast for tomorrow?"}'
+# -> {"answer":"I can only help with Amazon ASIN arbitrage analysis.","sql":null,"out_of_scope":true,"rows":[]}
+```
+
+### `POST /chat`
+
+多轮示例（真实跑过，见 `candidate_package/test_evidence/phase4/chat_scenario_A.txt`）：
+
+```bash
+SID=demo-session-1
+curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SID\",\"message\":\"Show me the ASINs that are currently eligible\"}"
+# -> 16 条 eligible ASIN，session_state.active_filters={"eligible_only":true,...}
+
+curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"session_id\":\"$SID\",\"message\":\"OK now narrow that to ones with ROI above 25 percent\"}"
+# -> 收窄到 7 条，active_filters 里 eligible_only 和 min_roi 都保留（累积，不是互相覆盖）
+```
+
+`WS /chat/stream?token=<token>` 是给前端用的流式版本，事件协议见
+`app/routers/chat.py` 顶部注释。
+
+## 前端
+
+Vue 3 SPA，`http://localhost:5173`（`docker compose up` 已包含）。截图在
+`candidate_package/test_evidence/phase5/`。
+
+## 成本核算
+
+```bash
+python3 scripts/cost_report.py
+```
+
+## 目录结构 / 架构细节
+
+见 [`ARCHITECTURE.md`](ARCHITECTURE.md) §5。测试：`tests/`（`pytest`，200 项）；
+验收脚本：`scripts/`（黑盒，打真实 `docker compose` 栈）。

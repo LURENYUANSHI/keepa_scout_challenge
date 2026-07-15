@@ -1,0 +1,24 @@
+                             Table "public.asins"
+      Column       |           Type           | Collation | Nullable | Default 
+-------------------+--------------------------+-----------+----------+---------
+ asin              | text                     |           | not null | 
+ title             | text                     |           |          | 
+ buybox            | numeric                  |           |          | 
+ referral_fee_pct  | numeric                  |           |          | 
+ sales_rank        | bigint                   |           |          | 
+ amazon_buybox_pct | numeric                  |           |          | 
+ monthly_sold      | numeric                  |           |          | 
+ eligible          | boolean                  |           |          | 
+ filter_failed     | text                     |           |          | 
+ computed_roi_pct  | numeric                  |           |          | 
+ supplier_cost     | numeric                  |           |          | 
+ snapshot_at       | timestamp with time zone |           |          | 
+Indexes:
+    "asins_pkey" PRIMARY KEY, btree (asin)
+    "ix_asins_amazon_buybox_pct" btree (amazon_buybox_pct)
+    "ix_asins_computed_roi_pct" btree (computed_roi_pct)
+    "ix_asins_eligible" btree (eligible)
+Referenced by:
+    TABLE "asin_price_stats" CONSTRAINT "asin_price_stats_asin_fkey" FOREIGN KEY (asin) REFERENCES asins(asin)
+    TABLE "refresh_job_items" CONSTRAINT "refresh_job_items_asin_fkey" FOREIGN KEY (asin) REFERENCES asins(asin)
+

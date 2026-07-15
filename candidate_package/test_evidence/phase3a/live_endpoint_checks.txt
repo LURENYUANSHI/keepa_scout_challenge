@@ -1,0 +1,15 @@
+=== /eligibility/{unknown} no token ===
+{"detail":"Missing or invalid authentication token."}
+HTTP_STATUS:401
+=== /eligibility/{unknown asin} with token -> 404 expected ===
+{"detail":"ASIN 'B00HEON30Y' not found — has it been ETL'd / refreshed yet?"}
+HTTP_STATUS:404
+=== POST /eligibility/batch mixed known/unknown ===
+[{"asin":"B00HEON30Y","error":"not_found"},{"asin":"TOTALLY_FAKE_ASIN","error":"not_found"}]
+HTTP_STATUS:200
+=== GET /upc live (Keepa unreachable expected -> graceful, not 500) ===
+
+HTTP_STATUS:000
+{"detail":"Keepa lookup failed ('70537500052'): ConnectTimeout"}
+HTTP_STATUS:502
+TIME:30.022571

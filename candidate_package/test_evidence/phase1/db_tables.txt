@@ -1,0 +1,13 @@
+                List of relations
+ Schema |       Name        | Type  |    Owner    
+--------+-------------------+-------+-------------
+ public | asin_price_stats  | table | keepa_scout
+ public | asins             | table | keepa_scout
+ public | auth_tokens       | table | keepa_scout
+ public | chat_sessions     | table | keepa_scout
+ public | llm_usage_log     | table | keepa_scout
+ public | refresh_job_items | table | keepa_scout
+ public | refresh_jobs      | table | keepa_scout
+ public | users             | table | keepa_scout
+(8 rows)
+

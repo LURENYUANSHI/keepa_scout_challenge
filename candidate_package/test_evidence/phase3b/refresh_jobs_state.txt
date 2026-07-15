@@ -1,0 +1,10 @@
+     job_id     | state | trigger_source |             triggered_by             | total | done | failed 
+----------------+-------+----------------+--------------------------------------+-------+------+--------
+ r-a42002d4eabf | done  | manual         | c3f0b6b2-9da6-4c9a-a021-4caeb1b741a1 |    32 |    0 |     32
+(1 row)
+
+ state  | count 
+--------+-------
+ failed |    32
+(1 row)
+

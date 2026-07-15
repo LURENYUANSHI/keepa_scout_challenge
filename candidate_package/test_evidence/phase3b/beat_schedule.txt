@@ -1,0 +1,10 @@
+ Container keepa_scout_challenge-broker-1 Running 
+ Container keepa_scout_challenge-db-1 Running 
+ Container keepa_scout_challenge-db-1 Waiting 
+ Container keepa_scout_challenge-broker-1 Waiting 
+ Container keepa_scout_challenge-db-1 Healthy 
+ Container keepa_scout_challenge-broker-1 Healthy 
+ Container keepa_scout_challenge-api-run-6f098c266455 Creating 
+ Container keepa_scout_challenge-api-run-6f098c266455 Created 
+{'daily-refresh-04-00-utc': {'task': 'app.tasks.refresh_tasks.run_scheduled_refresh', 'schedule': <crontab: 0 4 * * * (m/h/dM/MY/d)>}}
+timezone= UTC

@@ -1,0 +1,9 @@
+ eligible |  filter_failed   | count 
+----------+------------------+-------
+ f        | amazon_pct       |     4
+ f        | buybox           |     3
+ f        | rank             |     6
+ f        | referral_fee_pct |     3
+ t        |                  |    16
+(5 rows)
+
