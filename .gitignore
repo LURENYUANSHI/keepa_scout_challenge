@@ -38,3 +38,4 @@ data/scout.db*
 # ── Allowed exceptions ──
 !candidate_package/data/sample_asins.csv
 !candidate_package/data/upc_test_cases.json
+.gif_frames/
