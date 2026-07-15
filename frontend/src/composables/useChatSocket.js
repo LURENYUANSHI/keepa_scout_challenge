@@ -22,20 +22,18 @@
 //   handshake with code 4401 without ever accepting it.
 // - Client sends one `{"session_id", "message"}` JSON text frame right
 //   after the socket opens.
-// - Server sends, per turn, in order: zero or more
-//   `tool_call_start`/`tool_call_result` pairs (one pair per tool call, sent
-//   the moment each happens — never batched), then either
-//   zero-or-more `{"type":"answer_delta", "content": "..."}` (one per
-//   token/token-chunk of the final answer, sent as the LLM generates them —
-//   never batched) followed by `{"type":"answer_done"}` +
-//   `{"type":"session_state", ...}` on success, or a single
-//   `{"type":"error", ...}` on turn failure.
-// - Rare: a run of `answer_delta`s can be followed by
-//   `{"type":"answer_retract"}` instead of `answer_done` — the backend
-//   optimistically streams as soon as it sees answer-shaped text, but the
-//   underlying LLM occasionally narrates ("Let me look that up...") right
-//   before deciding to call a tool after all; the client must then discard
-//   that in-progress bubble entirely rather than finalize it.
+// - Server sends, per turn: interleaved `tool_call_start`/`tool_call_result`
+//   pairs (one pair per tool call, sent the moment each happens — never
+//   batched) and answer segments — each segment is a run of
+//   `{"type":"answer_delta", "content": "..."}` (one per token/token-chunk,
+//   sent as the LLM generates them — never batched) closed by one
+//   `{"type":"answer_done"}`. A turn usually has one segment (after all
+//   tool calls resolve), but the model sometimes writes the FIRST part of
+//   its answer before its tool calls (e.g. the explanation half of a mixed
+//   question) — that arrives as its own delta-run + answer_done BEFORE the
+//   tool events, and the post-tool segment continues without repeating it.
+//   The turn ends with `{"type":"session_state", ...}` on success, or a
+//   single `{"type":"error", ...}` on turn failure.
 //
 // HARNESS.md §10.3 point 3: a broken WS must never leave the UI silently
 // stuck. This composable surfaces a `status` ref the component renders as a
@@ -86,9 +84,6 @@ export function useChatSocket(handlers = {}) {
         break
       case 'answer_done':
         handlers.onAnswerDone?.(data)
-        break
-      case 'answer_retract':
-        handlers.onAnswerRetract?.(data)
         break
       case 'session_state':
         turnSettled = true

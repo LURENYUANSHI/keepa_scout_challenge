@@ -69,6 +69,13 @@ from pydantic.v1 import ValidationError
 
 from app.agent.llm import build_chat_llm
 from app.agent.state import AgentState
+from app.eligibility import (
+    AMAZON_PCT_THRESHOLD,
+    BUYBOX_THRESHOLD,
+    MONTHLY_SOLD_THRESHOLD,
+    RANK_THRESHOLD,
+)
+from app.ingest import PRICE_ANOMALY_THRESHOLD_PCT
 from app.agent.tools import (
     ALL_TOOLS,
     TOOLS_BY_NAME,
@@ -103,9 +110,33 @@ text and nothing else, and do NOT call any tool:
 Important distinction: boundary/definitional questions ABOUT this domain
 ("What does ROI mean?", "What is Amazon BuyBox share?", "How does
 eligibility work?", "What counts as a price anomaly?") ARE in scope -- answer
-them directly and helpfully using your own knowledge of this system's rules,
-you do not need a tool call for a definitional question and you must NOT
-refuse them.
+them directly and helpfully, you do not need a tool call for a definitional
+question and you must NOT refuse them. When explaining this system's rules,
+use EXACTLY the definitions below -- never invent, round, or embellish a
+rule or threshold that isn't listed here.
+
+This system's actual rules (the ground truth for any explanation you give):
+- An ASIN is eligible only if it passes ALL 5 checks, evaluated in order;
+  the first failing check's name is recorded as `filter_failed`:
+  1. referral_fee_pct is present and > 0.
+  2. sales_rank <= {RANK_THRESHOLD:,} OR monthly_sold >= {MONTHLY_SOLD_THRESHOLD}
+     (a strong monthly-sales signal exempts a poor rank).
+  3. BuyBox price >= ${BUYBOX_THRESHOLD}.
+  4. amazon_buybox_pct <= {AMAZON_PCT_THRESHOLD} (share of time Amazon itself
+     holds the BuyBox; missing data counts as passing -- no evidence of
+     Amazon dominance).
+  5. monthly_sold is unknown (null) OR >= {MONTHLY_SOLD_THRESHOLD}.
+- There is NO minimum-ROI eligibility rule and NO maximum-supplier-cost
+  rule -- do not claim one exists.
+- ROI formula: payout = buybox - referral fee (buybox * referral_fee_pct/100)
+  - FBA pick&pack fee - $0.50 monthly storage estimate;
+  cost = supplier_cost * number of items per listing (at least 1);
+  computed_roi_pct = 100 * (payout - cost) / cost. ROI is null (unknown, not
+  zero) when any required input is missing.
+- Price anomaly: the current BuyBox deviates more than
+  {PRICE_ANOMALY_THRESHOLD_PCT}% (either direction) from its 90-day average.
+- Data freshness: a snapshot older than 24 hours is flagged stale and worth
+  a POST /refresh.
 
 Tool usage:
 - build_filter_sql: filtering/sorting/listing ASINs by ROI, eligibility,
@@ -125,10 +156,12 @@ Tool usage:
 - reset_topic: the user explicitly wants to change topics / drop the
   current filters and start over.
 
-When you decide to call a tool, call it directly -- do NOT write any
-narration/commentary beforehand (no "Let me look that up", "I'll fetch
-that for you", etc.). Save all visible prose for your final response, after
-every tool call for this turn has already resolved.
+When you decide to call a tool, do NOT write filler narration beforehand
+(no "Let me look that up", "I'll fetch that for you", etc.) -- call it
+directly. Anything you DO write before a tool call stays visible to the
+user as part of your answer (e.g. answering the explanation half of a
+mixed question before fetching data is fine) -- so never repeat that text
+after the tool call; continue from where it left off.
 
 Always answer using only data the tools actually returned -- never fabricate
 ASINs, prices, or metrics. If a snapshot is stale or a price looks
@@ -199,8 +232,7 @@ def _chunk_text(content: Any) -> str:
     """Best-effort plain text out of one streamed chunk's `.content` --
     almost always already a `str` for this repo's OpenAI-compatible
     provider (verified empirically), but some providers emit a list of
-    content blocks per chunk; mirrors `last_ai_text`'s handling of that
-    shape below."""
+    content blocks per chunk, so both shapes are handled."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -212,11 +244,12 @@ async def _stream_agent_response(
     llm: ChatOpenAI, messages: list[Any], config: RunnableConfig, sink: Any
 ) -> AIMessage:
     """Streams this one LLM call token-by-token, forwarding the user-facing
-    final-answer tokens to `sink` as `{"type": "answer_delta", ...}` events
+    answer tokens to `sink` as `{"type": "answer_delta", ...}` events
     (app/routers/chat.py's WS protocol), followed by `{"type":
-    "answer_done"}` once the stream ends -- or, if what looked like an
-    answer turns out to have been a tool-call turn after all, a
-    `{"type": "answer_retract"}` instead (see below).
+    "answer_done"}` -- either when the stream ends (the turn's final
+    answer), or the moment `tool_call_chunks` show up mid-stream (the
+    content so far was the pre-tool segment of the answer; it gets
+    finalized as its own visible bubble, see below).
 
     `agent_node` runs once per tool round (see `should_continue` below); a
     round's LLM call either ends in an `AIMessage` with `tool_calls` set
@@ -243,13 +276,17 @@ async def _stream_agent_response(
     Given that, this can't safely wait for full certainty before forwarding
     anything (that would mean buffering the entire answer turn too, which
     is exactly the "wait, then dump it all at once" bug this whole feature
-    exists to fix). Instead it streams optimistically the moment it sees
-    content with zero `tool_call_chunks` so far, and if `tool_call_chunks`
-    then shows up LATER in that same stream (proving it was actually a
-    tool-call turn all along), it sends one `{"type": "answer_retract"}`
-    telling the client to discard the bubble it just started -- a rare
-    correction, not the common case, but a real one (confirmed against a
-    live run, not assumed away).
+    exists to fix). So it streams optimistically the moment it sees content
+    with zero `tool_call_chunks` so far. If `tool_call_chunks` then show up
+    LATER in that same stream, the already-streamed content is kept and
+    finalized with an `answer_done` (NOT discarded): a live DeepSeek run on
+    a mixed "explain the rules, then fetch the data" question streamed the
+    entire 1,200-char explanation half of its answer as pre-tool content,
+    and the post-tool round then didn't repeat it -- so this content is a
+    real answer segment the user must see, not narration to clean up. (An
+    earlier revision sent `answer_retract` here to delete the bubble; that
+    permanently lost the pre-tool half of exactly those answers. The event
+    type no longer exists in the protocol.)
     """
     full: Any = None
     decided: str | None = None  # None (undecided) -> "tool_call" | "answer"
@@ -259,7 +296,17 @@ async def _stream_agent_response(
 
         if full.tool_call_chunks and decided != "tool_call":
             if decided == "answer":
-                await sink({"type": "answer_retract"})
+                # The content streamed so far is NOT throwaway narration --
+                # observed live with DeepSeek on mixed "explain X, then
+                # fetch Y" questions: the model writes the entire
+                # explanation half of its answer as content BEFORE emitting
+                # the tool call, and the post-tool round then deliberately
+                # does not repeat it (it's already in the message history).
+                # The old behavior here (answer_retract -> client deletes
+                # the bubble) therefore permanently lost that half of the
+                # answer. Finalize it as a visible answer segment instead;
+                # the client starts a fresh bubble for the post-tool round.
+                await sink({"type": "answer_done"})
             decided = "tool_call"
             continue
 
@@ -534,23 +581,6 @@ def build_graph(checkpointer, store):
     return graph.compile(checkpointer=checkpointer, store=store)
 
 
-def last_ai_text(messages: list[Any]) -> str:
-    for message in reversed(messages):
-        if isinstance(message, AIMessage):
-            content = message.content
-            if isinstance(content, str) and content.strip():
-                return content
-            if isinstance(content, list):
-                # some providers return content blocks; join text parts
-                text_parts = [
-                    part.get("text", "") for part in content if isinstance(part, dict)
-                ]
-                joined = "".join(text_parts).strip()
-                if joined:
-                    return joined
-    return ""
-
-
 def messages_this_turn(messages: list[Any]) -> list[Any]:
     """All messages appended since (and including) the most recent
     HumanMessage -- i.e. this turn's work."""
@@ -560,6 +590,29 @@ def messages_this_turn(messages: list[Any]) -> list[Any]:
         if isinstance(message, HumanMessage):
             break
     return list(reversed(turn))
+
+
+def turn_answer_text(messages: list[Any]) -> str:
+    """All user-visible answer text this turn, in message order: every
+    AIMessage's text content since the most recent HumanMessage, joined
+    with a blank line.
+
+    A turn's answer can span MORE than one AIMessage: the model may write
+    the first half of its answer as content on the same AIMessage that
+    carries its tool_calls (see `_stream_agent_response` -- that segment is
+    streamed and kept), and the rest in the post-tool round, which
+    deliberately doesn't repeat the first half. Taking only the LAST
+    non-empty AIMessage (this function's predecessor, `last_ai_text`) would
+    silently drop the pre-tool half for exactly those turns, so
+    non-streaming callers (POST /chat, the WS fallback path) use this.
+    """
+    parts: list[str] = []
+    for message in messages_this_turn(messages):
+        if isinstance(message, AIMessage):
+            text = _chunk_text(message.content).strip()
+            if text:
+                parts.append(text)
+    return "\n\n".join(parts)
 
 
 def extract_results(messages: list[Any]) -> list[dict[str, Any]]:
