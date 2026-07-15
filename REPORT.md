@@ -1,5 +1,11 @@
 # REPORT
 
+## 演示视频（Loom）
+
+https://www.loom.com/share/134251fdba0d47008ee6e63bca12ce9c —— 《Agent 与 ETL 架构设计复盘》：
+架构决策（鉴权为什么是长期记忆的前提、Celery 选型、WS 每消息一条的生命周期、爬虫端与
+主业务分离）、/ask 移除的决策逻辑、仓库结构逐目录走读、Langfuse 可观测性的后续规划。
+
 ## DB / LLM 选型
 
 **DB：PostgreSQL**（不是 SQLite）。demo 数据只有 32 个 ASIN，但按目标生产规模（百万级价格
