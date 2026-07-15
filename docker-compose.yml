@@ -1,0 +1,86 @@
+# Diverges from candidate_package/docker-compose.example.yml: that reference
+# is the minimal SQLite path (single `api` service, no db/broker). Per
+# ARCHITECTURE.md §1 we use Postgres + Redis + Celery worker/beat, so this
+# adds `db`, `broker`, `worker`, `beat` services alongside `api`.
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      TZ: UTC
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: celery -A app.tasks.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      TZ: UTC
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+
+  beat:
+    build: .
+    command: celery -A app.tasks.celery_app beat --loglevel=info
+    env_file:
+      - .env
+    environment:
+      TZ: UTC
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: keepa_scout
+      POSTGRES_USER: keepa_scout
+      POSTGRES_PASSWORD: keepa_scout
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keepa_scout -d keepa_scout"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the built JS at build time (Vite inlines
+        # import.meta.env.* at build, not runtime) -- must be a URL the
+        # *browser* can reach, not the docker-network hostname `api`, since
+        # fetch() runs client-side on whatever host opens this page.
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+  broker:
+    image: redis:7
+    volumes:
+      - broker_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  db_data:
+  broker_data:
