@@ -1,7 +1,8 @@
 """The `/chat` StateGraph — see ARCHITECTURE.md §3.3/§4.
 
-Hand-rolled per ARCHITECTURE.md §4.1's "不用 Agent 框架" decision: two
-nodes (`agent`, `tools`) and one conditional edge, compiled with the
+Hand-rolled per ARCHITECTURE.md §4.1's "框架用得薄" decision (LangGraph
+for the StateGraph + checkpointer/store layer, nothing prebuilt on top):
+two nodes (`agent`, `tools`) and one conditional edge, compiled with the
 checkpointer (short-term, per `thread_id`) and store (long-term, per
 `user_id`) from app/agent/checkpointer.py / app/agent/store.py.
 
