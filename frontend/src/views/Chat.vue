@@ -9,7 +9,7 @@
 // chat") — see app/routers/chat.py: `session_id` is ownership-scoped per
 // user, LangGraph's checkpointer is what actually carries conversation
 // state across turns.
-import { ref, computed, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { useChatSocket } from '../composables/useChatSocket'
 import { renderMarkdown } from '../utils/markdown'
 
@@ -182,7 +182,12 @@ const socket = useChatSocket({
   },
 })
 
-const canSend = computed(() => socket.status.value === 'open' && !turnInFlight.value)
+// 'idle' counts as sendable -- that's the whole point of lazy connect:
+// the first send() is what triggers the WS handshake, not a prerequisite
+// for it.
+const canSend = computed(
+  () => (socket.status.value === 'open' || socket.status.value === 'idle') && !turnInFlight.value
+)
 
 // Only rendered while status !== 'open' (see template), so this only ever
 // distinguishes "still trying" (default banner) from "needs the user to do
@@ -220,9 +225,10 @@ function startNewChat() {
   currentAnswerMessage = null
 }
 
-onMounted(() => {
-  socket.connect()
-})
+// Deliberately no onMounted(() => socket.connect()) here -- visiting /chat
+// must not itself open a live WS connection (see useChatSocket.js's
+// 'idle' status doc comment). The connection is lazily triggered by the
+// first sendMessage() call instead.
 </script>
 
 <template>
@@ -240,7 +246,11 @@ onMounted(() => {
       </div>
     </div>
 
-    <div v-if="socket.status.value !== 'open'" class="banner" :class="bannerVariant">
+    <div
+      v-if="socket.status.value !== 'open' && socket.status.value !== 'idle'"
+      class="banner"
+      :class="bannerVariant"
+    >
       <template v-if="socket.status.value === 'connecting'">Connecting to chat…</template>
       <template v-else-if="socket.status.value === 'reconnecting'">
         Connection lost — reconnecting… (attempt {{ socket.attempt.value }}/{{ socket.maxAutoRetries }})

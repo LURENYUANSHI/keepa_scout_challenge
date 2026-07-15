@@ -39,6 +39,10 @@ const BASE_DELAY_MS = 1000
 const MAX_DELAY_MS = 10000
 
 // status values:
+//   'idle'          — no connection attempted yet (page just opened, user
+//                     hasn't sent anything) — deliberately NOT the same as
+//                     'connecting': visiting /chat must not itself open a
+//                     live server connection, only sending a message does.
 //   'connecting'    — first-ever connection attempt in flight
 //   'open'          — connected, ready to send
 //   'reconnecting'  — connection dropped, auto-retry in flight/scheduled
@@ -46,12 +50,16 @@ const MAX_DELAY_MS = 10000
 //   'unauthorized'  — server rejected the handshake (bad/expired token)
 //   'closed'        — deliberately closed by the client (unmount)
 export function useChatSocket(handlers = {}) {
-  const status = ref('connecting')
+  const status = ref('idle')
   const attempt = ref(0)
 
   let socket = null
   let retryTimer = null
   let deliberatelyClosed = false
+  // Set by send() when called before a connection exists yet -- flushed the
+  // moment the (lazily-triggered) connection actually opens, so the
+  // caller's first send() doesn't need to know/await the handshake itself.
+  let pendingSend = null
 
   function clearRetryTimer() {
     if (retryTimer) {
@@ -123,6 +131,11 @@ export function useChatSocket(handlers = {}) {
     socket.onopen = () => {
       attempt.value = 0
       status.value = 'open'
+      if (pendingSend) {
+        const { sessionId, message } = pendingSend
+        pendingSend = null
+        socket.send(JSON.stringify({ session_id: sessionId, message }))
+      }
     }
 
     socket.onmessage = handleMessage
@@ -154,11 +167,24 @@ export function useChatSocket(handlers = {}) {
   }
 
   function send(sessionId, message) {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return false
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ session_id: sessionId, message }))
+      return true
     }
-    socket.send(JSON.stringify({ session_id: sessionId, message }))
-    return true
+    // Lazy connect: nothing has opened a socket yet (status is 'idle', or a
+    // prior one was deliberately closed) -- this first send() is what
+    // triggers connect(), and the message is queued to flush from
+    // socket.onopen the moment the handshake completes. Refuse to queue a
+    // second message on top of one already pending (only 'idle'/'closed'
+    // reach here for a *fresh* queue; mid-connect/reconnect states already
+    // have a real attempt in flight that onopen will flush).
+    if (status.value === 'idle' || status.value === 'closed' || status.value === 'failed') {
+      pendingSend = { sessionId, message }
+      attempt.value = 0 // fresh attempt, not a continuation of a prior exhausted retry run
+      connect()
+      return true
+    }
+    return false
   }
 
   function disconnect() {
