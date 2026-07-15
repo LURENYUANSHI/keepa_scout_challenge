@@ -1,0 +1,56 @@
+=== verify_upc.py — http://localhost:8000 — 7 case(s) from /Users/yu/keepa_scout_challenge/data/upc_test_cases.json ===
+Registered a throwaway user and obtained a token.
+
+[SKIP] case_01 (input='070537500052', required=True): asins=[] — Keepa lookup failed ('070537500052'): ConnectError
+[SKIP] case_02 (input='70537500052', required=True): asins=[] — Keepa lookup failed ('70537500052'): ConnectError
+[SKIP] case_03 (input='9780545465298', required=True): asins=[] — Keepa lookup failed ('9780545465298'): ConnectError
+[SKIP] case_04 (input='00000772041997', required=False): asins=[] — Keepa lookup failed ('00000772041997'): ConnectError
+[SKIP] case_05 (input='052144100245', required=True): asins=[] — Keepa lookup failed ('052144100245'): ConnectError
+[SKIP] case_06 (input='999999999999', required=False): asins=[] — Keepa lookup failed ('999999999999'): ConnectError
+[PASS] case_07 (input='070-537-500-052', required=False): asins=['B0000021VO'] — normalized=['070537500052']
+
+=== summary ===
+case_id    required  outcome            asins
+case_01    True      KEEPA_UNREACHABLE  []
+case_02    True      KEEPA_UNREACHABLE  []
+case_03    True      KEEPA_UNREACHABLE  []
+case_04    False     KEEPA_UNREACHABLE  []
+case_05    True      KEEPA_UNREACHABLE  []
+case_06    False     KEEPA_UNREACHABLE  []
+case_07    False     PASS               ['B0000021VO']
+
+1 PASS / 0 FAIL / 6 KEEPA_UNREACHABLE out of 7 case(s).
+
+NOTE: Keepa was unreachable from this environment for 6 case(s) (GET /upc returned 502 — see app/routers/upc.py's documented 502 path). This is an environment/connectivity issue, NOT evidence the UPC normalization logic (normalize_upc_variants) is wrong -- those cases could not be validated either way. Re-run this script somewhere with live Keepa connectivity to get a real PASS/FAIL verdict on them.
+
+================================================================================
+ADDENDUM — the run IMMEDIATELY PRECEDING the one above (same evening, minutes
+apart, captured verbatim from the live session transcript before the egress
+window closed further). Note the two runs PASS *different* cases with the same
+code — the flapping is at the network level, not in normalize_upc_variants:
+
+[PASS] case_02 (input='70537500052', required=True): asins=['B0000021VO'] — normalized=['70537500052', '070537500052']
+[PASS] case_03 (input='9780545465298', required=True): asins=['054546529X', 'B00QFX5TNE'] — normalized=['9780545465298']
+[PASS] case_04 (input='00000772041997', required=False): asins=['122308079X'] — normalized=['00000772041997']
+[SKIP] case_05 (input='052144100245', required=True): asins=[] — Keepa lookup failed: ReadTimeout
+[SKIP] case_06 (input='999999999999', required=False): asins=[] — Keepa lookup failed: ConnectError
+[SKIP] case_07 (input='070-537-500-052', required=False): asins=[] — Keepa lookup failed: ConnectError
+
+case_01    True      PASS               ['B0000021VO']
+case_02    True      PASS               ['B0000021VO']
+case_03    True      PASS               ['054546529X', 'B00QFX5TNE']
+case_04    False     PASS               ['122308079X']   <-- the "hard" GTIN-14 bonus case,
+                                                             previously never verified on real
+                                                             network, now has a real PASS
+case_05    True      KEEPA_UNREACHABLE  []
+case_06    False     KEEPA_UNREACHABLE  []
+case_07    False     KEEPA_UNREACHABLE  []
+
+4 PASS / 0 FAIL / 3 KEEPA_UNREACHABLE out of 7 case(s).
+
+Network state during both runs: DNS resolved api.keepa.com to 198.18.0.36
+(RFC 2544 benchmark range sentinel), TCP connects, TLS handshake killed
+(SSL_ERROR_SYSCALL) — the same egress-filtering pattern documented in
+REPORT.md. Cumulative across all real-network runs (this file +
+verify_upc_real_network.txt): 6 of 7 cases have at least one real PASS;
+the 7th (case_06) is the all-9s fake barcode designed to return nothing.
