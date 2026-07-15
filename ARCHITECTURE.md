@@ -88,7 +88,7 @@ erDiagram
     CHAT_SESSIONS {
         text session_id PK
         uuid user_id FK "NOT NULL，不允许匿名"
-        text title "可空；首条用户消息前约60字符，只设置一次；NULL 时列表接口从 checkpoint 回填"
+        text title "可空；首条用户消息全文（截断只发生在前端展示层），只设置一次；NULL 时列表接口从 checkpoint 回填"
         timestamptz created_at
         timestamptz updated_at "每轮对话 touch，会话列表按它倒序"
     }
@@ -150,8 +150,9 @@ erDiagram
 **关键约束**：
 - `chat_sessions.user_id` **NOT NULL**——没有匿名会话，一个 session 必须属于一个登录用户
 - `chat_sessions` 做**归属校验 + 会话列表元数据**两件事：归属（这个 session_id 是不是这个
-  user 的）、`title`（首条用户消息截断，一次性设置，NULL 时由 `GET /chat/sessions` 从
-  checkpoint 首条 HumanMessage 回填并持久化）、`updated_at`（每轮 touch，列表排序键）。
+  user 的）、`title`（首条用户消息**全文**——截断只发生在前端展示层，一次性设置，NULL 时由
+  `GET /chat/sessions` 从 checkpoint 首条 HumanMessage 回填并持久化）、`updated_at`
+  （每轮 touch，列表排序键）。
   **不存** `active_filters`/`last_result_asins` 等短期状态——那些字段连同完整的消息/工具调用记录，由
   **LangGraph 的 Checkpointer**（`AsyncPostgresSaver`，按 `thread_id = session_id`）自动持久化，
   它会在同一个 Postgres 实例里自建 `checkpoints`/`checkpoint_writes`/`checkpoint_blobs` 表，
@@ -255,7 +256,7 @@ sequenceDiagram
     API->>API: 鉴权 → user_id
     API->>DB: SELECT * FROM chat_sessions WHERE session_id=?
     alt session 不存在
-        API->>DB: INSERT chat_sessions (session_id, user_id,<br/>title=首条消息截断, updated_at=now())
+        API->>DB: INSERT chat_sessions (session_id, user_id,<br/>title=首条消息全文, updated_at=now())
         Note over API: 新会话，归属当前登录用户
     else session 存在但 user_id 不匹配
         API-->>C: 403 Forbidden
@@ -409,27 +410,31 @@ sequenceDiagram
 
 ## 4. Agent / LLM 编排技术
 
-### 4.1 结论先行：不用 Agent 框架，用原生 tool calling，且每次调用都要落库
+### 4.1 结论先行：LangGraph 做薄编排 + 原生 tool calling，且每次调用都要落库
 
-不上 LangChain / CrewAI / AutoGen 这类框架。理由：
+**最终选型是 LangGraph**（一个 StateGraph：agent 节点 `bind_tools` + tools 节点 + 条件边 +
+`MAX_TOOL_ROUNDS` 上限），配 LLM 原生 `tools` / function-calling。
 
-- 这里的"agent"行为边界很窄（一组固定工具、每轮最多 N 次工具调用），框架的价值（管理成百
-  上千工具、多 agent 交接）用不上，只会带来版本抖动和调试黑盒
-- 工具的参数校验、SQL 安全校验必须是**确定性代码、每次都跑**，不能依赖框架内部"决定要不要
-  校验"的黑盒逻辑——控制力不够
-- 手写的 loop 更容易在 Loom 里逐行讲清楚（题目要求"仓库里每一个文件都要讲得清"）
+**这条结论推翻过本节的上一版立场**，如实记录：最初的判断是"不上任何 Agent 框架、手写
+tool-calling loop"（理由是工具集很小、框架是调试黑盒、手写更好在 Loom 里讲清楚）。这个立场
+被两件事推翻：① 手写方案实现到一半发现工具调用链路会丢——代码在猜出 intent 后悄悄调用工具，
+LLM 并不"知道"这些调用存在，消息表里也没有记录，审计/回放/多轮工具衔接都做不到；② 题目
+"重启存活"是硬性要求，手写路线意味着自己维护一套消息/工具调用/状态的持久化表，而调研发现
+LangGraph 的 Checkpointer/Store 正是这个问题的官方解法（细节见 §2 与 REPORT.md 决策记录①）。
+换到 LangGraph 后，原立场里真正重要的三条原则**原样保留**：
+
+- **框架用得薄**：只用 StateGraph + checkpointer/store 这一层，不上 CrewAI / AutoGen 式
+  多 agent 交接——工具集固定、每轮调用次数有上限，图结构小到可以在 Loom 里逐节点讲清楚
+- 工具的参数校验、SQL 安全校验是**确定性代码、每次都跑**（在 tools 节点的代码路径里，
+  不依赖框架内部"决定要不要校验"的黑盒逻辑）
 - **对话里发生的每一步都必须是可回放的**——LLM 决定调用哪个工具、传了什么参数、工具返回了
-  什么，这些不能只存在于一次函数调用的调用栈里，必须是持久化消息历史里一条独立的记录
-  （`AIMessage` 带 `tool_calls`，`ToolMessage` 带 `tool_call_id`+结果；由 checkpointer 落库，
-  `GET /chat/sessions/{id}/messages` 的历史回放直接消费这份记录——图 7）。这是对上一版设计
-  的修正——之前把 `build_filter_sql`/`lookup_asin`/`plan_combo` 写成代码在猜出 intent 后自己
-  悄悄调用，LLM 并不"知道"这些调用存在，消息表里也没有记录，等于对话的推理链路丢了一段，
-  没法审计/回放/在多轮工具调用时把上一步结果正确带给下一步。
+  什么，必须是持久化消息历史里一条独立的记录（`AIMessage` 带 `tool_calls`，`ToolMessage` 带
+  `tool_call_id`+结果；由 checkpointer 落库，`GET /chat/sessions/{id}/messages` 的历史回放
+  直接消费这份记录——图 7）
 
-技术选型：LLM 提供商的**原生 `tools` / function-calling API**——模型自己决定要不要调用、
-调哪个、传什么参数（不是代码替它决定），工具参数按 JSON Schema 强制校验，校验失败/字段
-缺失时**代码里把错误反馈给模型重试一次**（不是让模型自己决定要不要重试），超过重试次数
-直接判定该轮解析失败，走兜底话术，不假装成功。
+模型自己决定要不要调用工具、调哪个、传什么参数（不是代码替它决定），工具参数按 JSON Schema
+强制校验，校验失败/字段缺失时**代码里把错误反馈给模型重试一次**（不是让模型自己决定要不要
+重试），超过重试次数直接判定该轮解析失败，走兜底话术，不假装成功。
 
 ### 4.2 工具清单——LLM 能"做"的每一件事都是一个具名、带 Schema、会被记录的工具
 
