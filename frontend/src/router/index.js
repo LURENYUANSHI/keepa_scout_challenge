@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { newChatSessionId } from '../utils/session'
 
 const routes = [
   {
@@ -30,9 +31,18 @@ const routes = [
     component: () => import('../views/Refresh.vue'),
   },
   {
-    path: '/chat',
+    // session_id lives in the URL, not just component state -- a reload,
+    // a shared link, or browser back/forward must all land on the same
+    // conversation, not silently mint a fresh one. /chat with no param
+    // redirects to a freshly-generated session_id below.
+    path: '/chat/:sessionId',
     name: 'chat',
     component: () => import('../views/Chat.vue'),
+    props: true,
+  },
+  {
+    path: '/chat',
+    redirect: () => ({ name: 'chat', params: { sessionId: newChatSessionId() } }),
   },
   {
     path: '/:pathMatch(.*)*',

@@ -1,15 +1,27 @@
 // WS /chat/stream connection management, kept separate from Chat.vue so the
-// reconnect/backoff state machine can be reasoned about (and tested) on its
-// own — see app/routers/chat.py's module docstring for the wire protocol
-// this talks to.
+// per-turn socket lifecycle can be reasoned about (and tested) on its own —
+// see app/routers/chat.py's module docstring for the wire protocol this
+// talks to.
+//
+// One fresh WebSocket per turn, closed the moment the turn ends -- not one
+// long-lived connection reused across many turns. `send()` opens a new
+// socket, sends the single `{"session_id", "message"}` frame once it's
+// open, and the socket is closed as soon as `session_state` (success) or
+// `error` (turn failure) arrives. This means there is no persistent
+// connection to babysit between turns -- no idle-timeout/heartbeat concern,
+// and no reconnect/backoff state machine, since a dropped connection just
+// means *this* turn failed; the next send() opens an entirely new one.
+// (The backend's WS loop still supports many turns per connection --
+// nothing here relies on the server closing after one turn -- this is a
+// client-side choice.)
 //
 // Protocol recap (verified against app/routers/chat.py, not assumed):
 // - Connect: `ws(s)://<api>/chat/stream?token=<access_token>` — token is a
 //   query param because a plain `new WebSocket(url)` can't set an
 //   Authorization header. A bad/missing token means the server closes the
 //   handshake with code 4401 without ever accepting it.
-// - Client sends one `{"session_id", "message"}` JSON text frame per turn;
-//   the socket stays open across many turns.
+// - Client sends one `{"session_id", "message"}` JSON text frame right
+//   after the socket opens.
 // - Server sends, per turn, in order: zero or more
 //   `tool_call_start`/`tool_call_result` pairs (one pair per tool call, sent
 //   the moment each happens — never batched), then either
@@ -17,8 +29,7 @@
 //   token/token-chunk of the final answer, sent as the LLM generates them —
 //   never batched) followed by `{"type":"answer_done"}` +
 //   `{"type":"session_state", ...}` on success, or a single
-//   `{"type":"error", ...}` on turn failure (which does NOT close the
-//   connection — the client can send the next turn).
+//   `{"type":"error", ...}` on turn failure.
 // - Rare: a run of `answer_delta`s can be followed by
 //   `{"type":"answer_retract"}` instead of `answer_done` — the backend
 //   optimistically streams as soon as it sees answer-shaped text, but the
@@ -28,45 +39,33 @@
 //
 // HARNESS.md §10.3 point 3: a broken WS must never leave the UI silently
 // stuck. This composable surfaces a `status` ref the component renders as a
-// banner, auto-reconnects a few times with backoff, and exposes `retry()`
-// for a manual retry once auto-reconnect gives up.
+// banner for the two states that actually need one: `unauthorized` and
+// `error`.
 
 import { ref, onBeforeUnmount } from 'vue'
 import { getToken, WS_BASE_URL } from '../api/client'
 
-const MAX_AUTO_RETRIES = 5
-const BASE_DELAY_MS = 1000
-const MAX_DELAY_MS = 10000
-
 // status values:
-//   'idle'          — no connection attempted yet (page just opened, user
-//                     hasn't sent anything) — deliberately NOT the same as
-//                     'connecting': visiting /chat must not itself open a
-//                     live server connection, only sending a message does.
-//   'connecting'    — first-ever connection attempt in flight
-//   'open'          — connected, ready to send
-//   'reconnecting'  — connection dropped, auto-retry in flight/scheduled
-//   'failed'        — auto-retry attempts exhausted, needs a manual retry()
-//   'unauthorized'  — server rejected the handshake (bad/expired token)
-//   'closed'        — deliberately closed by the client (unmount)
+//   'idle'         — no turn in flight; ready to send. Also what a turn
+//                    settles back to once its socket closes cleanly — there
+//                    is no persistent 'open, waiting for the next message'
+//                    state to distinguish it from.
+//   'connecting'   — this turn's socket handshake is in flight
+//   'streaming'    — this turn's socket is open; tool calls/answer deltas
+//                    may be arriving
+//   'unauthorized' — the server rejected the handshake (bad/expired token)
+//   'error'        — this turn's socket closed before the turn finished
+//                    (network drop, server crash mid-turn, etc.) — no
+//                    auto-retry; the user resends
 export function useChatSocket(handlers = {}) {
   const status = ref('idle')
-  const attempt = ref(0)
 
   let socket = null
-  let retryTimer = null
-  let deliberatelyClosed = false
-  // Set by send() when called before a connection exists yet -- flushed the
-  // moment the (lazily-triggered) connection actually opens, so the
-  // caller's first send() doesn't need to know/await the handshake itself.
-  let pendingSend = null
-
-  function clearRetryTimer() {
-    if (retryTimer) {
-      clearTimeout(retryTimer)
-      retryTimer = null
-    }
-  }
+  // Flips true the moment session_state/error arrives for the in-flight
+  // turn, so the onclose that immediately follows (this same turn's socket
+  // being closed on purpose, right below) isn't mistaken for a mid-turn
+  // connection drop.
+  let turnSettled = false
 
   function handleMessage(event) {
     let data
@@ -92,111 +91,76 @@ export function useChatSocket(handlers = {}) {
         handlers.onAnswerRetract?.(data)
         break
       case 'session_state':
+        turnSettled = true
         handlers.onSessionState?.(data)
+        socket?.close()
         break
       case 'error':
+        turnSettled = true
         handlers.onTurnError?.(data)
+        socket?.close()
         break
       default:
         break
     }
   }
 
-  function scheduleReconnect() {
-    if (attempt.value >= MAX_AUTO_RETRIES) {
-      status.value = 'failed'
-      return
-    }
-    attempt.value += 1
-    status.value = 'reconnecting'
-    const delay = Math.min(BASE_DELAY_MS * 2 ** (attempt.value - 1), MAX_DELAY_MS)
-    retryTimer = setTimeout(connect, delay)
-  }
+  function send(sessionId, message) {
+    // Only an actually-in-flight turn blocks sending. 'error'/'unauthorized'
+    // are settled states from a PREVIOUS turn — a new send() is exactly how
+    // the user retries (fresh socket per turn), so they must not wedge the
+    // composer shut.
+    if (status.value === 'connecting' || status.value === 'streaming') return false
 
-  function connect() {
-    deliberatelyClosed = false
-    clearRetryTimer()
-    status.value = attempt.value > 0 ? 'reconnecting' : 'connecting'
+    turnSettled = false
+    status.value = 'connecting'
 
     const token = getToken()
     const url = `${WS_BASE_URL}/chat/stream?token=${encodeURIComponent(token || '')}`
 
+    let s
     try {
-      socket = new WebSocket(url)
+      s = new WebSocket(url)
     } catch {
-      scheduleReconnect()
-      return
+      status.value = 'error'
+      return false
+    }
+    socket = s
+
+    s.onopen = () => {
+      status.value = 'streaming'
+      s.send(JSON.stringify({ session_id: sessionId, message }))
     }
 
-    socket.onopen = () => {
-      attempt.value = 0
-      status.value = 'open'
-      if (pendingSend) {
-        const { sessionId, message } = pendingSend
-        pendingSend = null
-        socket.send(JSON.stringify({ session_id: sessionId, message }))
-      }
-    }
-
-    socket.onmessage = handleMessage
+    s.onmessage = handleMessage
 
     // onerror carries no useful detail in browsers (spec-hidden); onclose
-    // always follows it and is where the actual reconnect decision happens.
-    socket.onerror = () => {}
+    // always follows it and is where the actual status decision happens.
+    s.onerror = () => {}
 
-    socket.onclose = (event) => {
+    s.onclose = (event) => {
       socket = null
-      if (deliberatelyClosed) {
-        status.value = 'closed'
+      if (turnSettled) {
+        status.value = 'idle'
         return
       }
       // Server rejects the handshake itself with 4401 on a bad/expired
-      // token (see chat_stream()) — retrying with the same stale token
-      // would just loop, so surface a distinct state instead.
-      if (event.code === 4401) {
-        status.value = 'unauthorized'
-        return
-      }
-      scheduleReconnect()
+      // token (see chat_stream()).
+      status.value = event.code === 4401 ? 'unauthorized' : 'error'
     }
-  }
 
-  function retry() {
-    attempt.value = 0
-    connect()
-  }
-
-  function send(sessionId, message) {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ session_id: sessionId, message }))
-      return true
-    }
-    // Lazy connect: nothing has opened a socket yet (status is 'idle', or a
-    // prior one was deliberately closed) -- this first send() is what
-    // triggers connect(), and the message is queued to flush from
-    // socket.onopen the moment the handshake completes. Refuse to queue a
-    // second message on top of one already pending (only 'idle'/'closed'
-    // reach here for a *fresh* queue; mid-connect/reconnect states already
-    // have a real attempt in flight that onopen will flush).
-    if (status.value === 'idle' || status.value === 'closed' || status.value === 'failed') {
-      pendingSend = { sessionId, message }
-      attempt.value = 0 // fresh attempt, not a continuation of a prior exhausted retry run
-      connect()
-      return true
-    }
-    return false
+    return true
   }
 
   function disconnect() {
-    deliberatelyClosed = true
-    clearRetryTimer()
     if (socket) {
-      socket.close()
+      const s = socket
       socket = null
+      s.close()
     }
   }
 
   onBeforeUnmount(disconnect)
 
-  return { status, attempt, maxAutoRetries: MAX_AUTO_RETRIES, connect, disconnect, retry, send }
+  return { status, disconnect, send }
 }

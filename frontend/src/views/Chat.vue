@@ -5,13 +5,22 @@
 // remove/reinsert -> no orphan DOM nodes), and a dead socket must show a
 // clear state, never a silent hang.
 //
-// One session per page-load (sessionId regenerated on demand via "New
-// chat") — see app/routers/chat.py: `session_id` is ownership-scoped per
-// user, LangGraph's checkpointer is what actually carries conversation
-// state across turns.
-import { ref, computed, nextTick } from 'vue'
+// The session lives in the URL (`/chat/:sessionId`, router/index.js), not
+// just component state -- a reload, a shared link, or browser back/forward
+// must all land on the same conversation rather than silently minting a
+// fresh one. `sessionId` below mirrors the `sessionId` route prop; switching
+// sessions (New chat / clicking a past one) navigates via the router, and a
+// watcher on the prop is the single place that reacts to "the active
+// session changed" regardless of what triggered it.
+import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useChatSocket } from '../composables/useChatSocket'
 import { renderMarkdown } from '../utils/markdown'
+import { api, ApiError } from '../api/client'
+import { newChatSessionId } from '../utils/session'
+
+const props = defineProps({ sessionId: { type: String, required: true } })
+const router = useRouter()
 
 let seq = 0
 function nextId() {
@@ -19,25 +28,174 @@ function nextId() {
   return `m${seq}`
 }
 
-function newSessionId() {
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-const sessionId = ref(newSessionId())
+const sessionId = ref(props.sessionId)
 const messages = ref([])
 const sessionState = ref({ active_filters: {}, last_result_asins: [], resolved_entity: null })
 const inputText = ref('')
 const turnInFlight = ref(false)
 const transcriptEl = ref(null)
 
+// Tracks which (if any) message in `messages` is still accepting
+// answer_delta chunks -- declared up here, not down near useChatSocket(),
+// because loadSessionHistory() (below) already assigns to it, and that
+// function is invoked synchronously on mount via the `immediate: true`
+// sessionId watcher, before `<script setup>` reaches any statement below
+// this point.
+let currentAnswerMessage = null
+
+// --- session list (history/resume) ------------------------------------
+// Plain REST via api/client.js -- deliberately does NOT touch
+// useChatSocket.js at all. Fetching the list and loading a past session's
+// history must not themselves open a WS connection; only an actual
+// sendMessage() does that, and only for the duration of that one turn (see
+// useChatSocket.js).
+const sessions = ref([])
+const sessionsLoading = ref(false)
+const sessionsError = ref('')
+const sidebarOpen = ref(true)
+const historyLoading = ref(false)
+const historyError = ref('')
+
+async function fetchSessions() {
+  sessionsLoading.value = true
+  sessionsError.value = ''
+  try {
+    sessions.value = await api.get('/chat/sessions')
+  } catch (err) {
+    sessionsError.value = err instanceof ApiError ? err.message : 'Could not load past conversations.'
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+onMounted(fetchSessions)
+
+// Slow tick that the sidebar timestamps read from, so "just now" / "2m ago"
+// keep aging in place instead of freezing at whatever they were when the
+// list last (re)fetched.
+const nowTick = ref(Date.now())
+let tickTimer = null
+onMounted(() => {
+  tickTimer = setInterval(() => {
+    nowTick.value = Date.now()
+  }, 30_000)
+})
+onBeforeUnmount(() => clearInterval(tickTimer))
+
+// Tiny local relative-time formatter -- no date library dependency, this is
+// the only place in the app that needs one.
+function relativeTime(iso) {
+  if (!iso) return ''
+  const diffMs = nowTick.value - new Date(iso).getTime()
+  const diffSec = Math.round(diffMs / 1000)
+  if (diffSec < 5) return 'just now'
+  if (diffSec < 60) return `${diffSec}s ago`
+  const diffMin = Math.round(diffSec / 60)
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHour = Math.round(diffMin / 60)
+  if (diffHour < 24) return `${diffHour}h ago`
+  const diffDay = Math.round(diffHour / 24)
+  if (diffDay < 30) return `${diffDay}d ago`
+  const diffMonth = Math.round(diffDay / 30)
+  if (diffMonth < 12) return `${diffMonth}mo ago`
+  const diffYear = Math.round(diffMonth / 12)
+  return `${diffYear}y ago`
+}
+
+// Single place that reacts to "the active session is now X", regardless of
+// whether that came from the initial page load, clicking a past session,
+// "New chat", a browser back/forward, or a pasted link -- all of those just
+// change the `sessionId` route param, and this watcher is what actually
+// replays history for it via GET /chat/sessions/{id}/messages, reusing the
+// exact same {id, type: 'user'|'tool'|'answer', ...} shape/templates live
+// turns already use (backend's app/routers/chat.py `_replay_messages`
+// builds that shape directly) -- ids are re-minted through nextId() so they
+// don't collide with ids any subsequent live turn generates.
+//
+// A brand-new "New chat" id (no ChatSession row yet -- rows are only
+// minted once a first turn actually lands) comes back as a plain 200 + []
+// from the backend, exactly like an existing-but-empty session, so the
+// common new-chat path never even logs a console 404. The 404 tolerance in
+// the catch below is kept as defensive back-compat (e.g. an older API
+// container still running the previous semantics), not something the
+// current backend emits for this route.
+//
+// Never opens a WS connection itself -- history replay is plain REST;
+// sending a NEW message in the (possibly-resumed) session is what opens
+// this turn's own socket (see useChatSocket.js).
+async function loadSessionHistory(id) {
+  historyError.value = ''
+  messages.value = []
+  sessionState.value = { active_filters: {}, last_result_asins: [], resolved_entity: null }
+  currentAnswerMessage = null
+
+  historyLoading.value = true
+  try {
+    const history = await api.get(`/chat/sessions/${encodeURIComponent(id)}/messages`)
+    messages.value = history.map((m) => ({ ...m, id: nextId() }))
+    scrollToBottom(true)
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 404)) {
+      historyError.value = err instanceof ApiError ? err.message : 'Could not load that conversation.'
+    }
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+watch(
+  () => props.sessionId,
+  (id) => {
+    sessionId.value = id
+    loadSessionHistory(id)
+  },
+  { immediate: true }
+)
+
+function selectSession(session) {
+  if (turnInFlight.value || historyLoading.value) return
+  if (session.session_id === sessionId.value) return
+  router.push({ name: 'chat', params: { sessionId: session.session_id } })
+}
+
 const hasActiveFilters = computed(() => {
   const filters = sessionState.value.active_filters
   return Boolean(filters && Object.keys(filters).length)
 })
 
-function scrollToBottom() {
+// Auto-follow: stay pinned to the bottom while deltas stream in, but the
+// moment the user scrolls up to re-read something, stop yanking them back
+// down on every token. Deliberate actions (sending a message, switching
+// sessions, a turn error) re-engage following via `force`.
+const followBottom = ref(true)
+let lastScrollTop = 0
+
+function onTranscriptScroll() {
+  const el = transcriptEl.value
+  if (!el) return
+  // Disengage following only on an upward scroll that actually LEAVES the
+  // bottom. Both halves of that condition matter:
+  // - "distance from bottom" alone misfires when a large delta (a whole
+  //   markdown table in one chunk) grows scrollHeight before the pin runs —
+  //   the scroll event then observes a big gap the user never created;
+  // - "went up" alone misfires because each delta re-renders the answer
+  //   bubble's v-html, and the momentary DOM swap can shrink scrollHeight,
+  //   making the browser clamp scrollTop DOWN — an upward move with no user
+  //   involved. A clamp always lands exactly at the (new) bottom, though,
+  //   so requiring "up AND away from the bottom" filters it out.
+  const wentUp = el.scrollTop < lastScrollTop - 1
+  lastScrollTop = el.scrollTop
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  if (nearBottom) {
+    followBottom.value = true
+  } else if (wentUp) {
+    followBottom.value = false
+  }
+}
+
+function scrollToBottom(force = false) {
+  if (force) followBottom.value = true
+  if (!followBottom.value) return
   nextTick(() => {
     const el = transcriptEl.value
     if (el) el.scrollTop = el.scrollHeight
@@ -95,13 +253,12 @@ function compactResult(result) {
 // (`streaming: true`, `content: ''`) and every delta after that MUTATES
 // its `.content` in place (`+=`) — never pushes a new bubble — so the
 // answer visibly grows token-by-token instead of popping in all at once.
-// `currentAnswerMessage` tracks which bubble is still accepting deltas;
-// answer_done clears it and flips `streaming` off (stops the blinking
-// cursor). Only one answer stream is ever in flight at a time (the server
-// only starts streaming the final answer after every tool call for the
-// turn has already resolved), so there's no ambiguity about which bubble
-// a delta belongs to.
-let currentAnswerMessage = null
+// `currentAnswerMessage` (declared near the top of this file, see comment
+// there) tracks which bubble is still accepting deltas; answer_done clears
+// it and flips `streaming` off (stops the blinking cursor). Only one answer
+// stream is ever in flight at a time (the server only starts streaming the
+// final answer after every tool call for the turn has already resolved),
+// so there's no ambiguity about which bubble a delta belongs to.
 
 const socket = useChatSocket({
   onToolStart(data) {
@@ -167,35 +324,54 @@ const socket = useChatSocket({
   onSessionState(data) {
     sessionState.value = data.state || {}
     turnInFlight.value = false
+    // End of every turn -- refetch the sidebar list so a brand-new
+    // session (created by this very turn) shows up with its title, and an
+    // existing one re-sorts to the top from its bumped `updated_at`,
+    // without waiting for a manual page reload.
+    fetchSessions()
   },
   onTurnError(data) {
     // A turn-level error can arrive mid-stream (e.g. the graph blew up
     // after already having streamed a few answer_delta events) — don't
     // leave a bubble stuck showing a blinking "still streaming" cursor.
-    if (currentAnswerMessage) {
-      currentAnswerMessage.streaming = false
-      currentAnswerMessage = null
-    }
-    messages.value.push({ id: nextId(), type: 'error', content: data.detail })
-    turnInFlight.value = false
-    scrollToBottom()
+    finalizeTurnWithError(data.detail)
   },
 })
 
-// 'idle' counts as sendable -- that's the whole point of lazy connect:
-// the first send() is what triggers the WS handshake, not a prerequisite
-// for it.
-const canSend = computed(
-  () => (socket.status.value === 'open' || socket.status.value === 'idle') && !turnInFlight.value
+// The turn's socket can also disappear with no `error` frame at all --
+// a network drop or the server crashing mid-turn. useChatSocket.js surfaces
+// that as `status === 'error'`; this is the one place both failure shapes
+// (an explicit `error` frame, and no frame at all) funnel through the same
+// cleanup, so a dropped connection can never leave `turnInFlight` stuck
+// `true` (which would otherwise permanently disable the composer).
+function finalizeTurnWithError(detail) {
+  if (currentAnswerMessage) {
+    currentAnswerMessage.streaming = false
+    currentAnswerMessage = null
+  }
+  messages.value.push({ id: nextId(), type: 'error', content: detail })
+  turnInFlight.value = false
+  scrollToBottom(true)
+}
+
+watch(
+  () => socket.status.value,
+  (value) => {
+    if (value === 'error' && turnInFlight.value) {
+      finalizeTurnWithError('Connection lost before the turn finished — please try again.')
+    }
+  }
 )
 
-// Only rendered while status !== 'open' (see template), so this only ever
-// distinguishes "still trying" (default banner) from "needs the user to do
-// something" (error styling).
-const bannerVariant = computed(() => {
-  const terminal = socket.status.value === 'failed' || socket.status.value === 'unauthorized'
-  return terminal ? 'banner-error' : ''
-})
+// Sendable = no turn currently in flight. 'connecting'/'streaming' mean a
+// turn is running on its own socket; 'error' and 'unauthorized' are settled
+// failure states and MUST stay sendable — the error banner literally tells
+// the user to try sending again (each send() opens a fresh socket, so
+// retrying costs nothing), and a permanently disabled composer after one
+// network blip would otherwise force a full page reload.
+const canSend = computed(
+  () => socket.status.value !== 'connecting' && socket.status.value !== 'streaming' && !turnInFlight.value
+)
 
 function sendMessage() {
   const text = inputText.value.trim()
@@ -214,156 +390,297 @@ function sendMessage() {
   }
   inputText.value = ''
   turnInFlight.value = true
-  scrollToBottom()
+  scrollToBottom(true)
 }
 
 function startNewChat() {
   if (turnInFlight.value) return
-  sessionId.value = newSessionId()
-  messages.value = []
-  sessionState.value = { active_filters: {}, last_result_asins: [], resolved_entity: null }
-  currentAnswerMessage = null
+  router.push({ name: 'chat', params: { sessionId: newChatSessionId() } })
 }
-
-// Deliberately no onMounted(() => socket.connect()) here -- visiting /chat
-// must not itself open a live WS connection (see useChatSocket.js's
-// 'idle' status doc comment). The connection is lazily triggered by the
-// first sendMessage() call instead.
 </script>
 
 <template>
-  <div>
-    <div class="chat-head">
-      <div>
-        <p class="eyebrow">04 — Multi-turn assistant</p>
-        <h1>Chat</h1>
-      </div>
-      <div class="chat-head-right">
-        <span class="session-tag mono">session {{ sessionId.slice(0, 8) }}</span>
-        <button type="button" class="btn-text" :disabled="turnInFlight" @click="startNewChat">
-          New chat
+  <div class="chat-layout">
+    <aside class="chat-sidebar panel" :class="{ 'chat-sidebar-collapsed': !sidebarOpen }">
+      <div class="sidebar-head">
+        <span class="sidebar-title">History</span>
+        <button
+          type="button"
+          class="btn-text"
+          :aria-expanded="sidebarOpen"
+          @click="sidebarOpen = !sidebarOpen"
+        >
+          {{ sidebarOpen ? 'Hide' : 'Show' }}
         </button>
       </div>
-    </div>
 
-    <div
-      v-if="socket.status.value !== 'open' && socket.status.value !== 'idle'"
-      class="banner"
-      :class="bannerVariant"
-    >
-      <template v-if="socket.status.value === 'connecting'">Connecting to chat…</template>
-      <template v-else-if="socket.status.value === 'reconnecting'">
-        Connection lost — reconnecting… (attempt {{ socket.attempt.value }}/{{ socket.maxAutoRetries }})
-      </template>
-      <template v-else-if="socket.status.value === 'failed'">
-        Couldn't reconnect after {{ socket.maxAutoRetries }} attempts — the chat connection is down.
-        <button type="button" class="btn-text" @click="socket.retry()">Retry connection</button>
-      </template>
-      <template v-else-if="socket.status.value === 'unauthorized'">
-        Your session expired or is invalid.
-        <router-link to="/login">Log in again</router-link>.
-      </template>
-      <template v-else-if="socket.status.value === 'closed'">Chat connection closed.</template>
-    </div>
-
-    <details v-if="hasActiveFilters" class="panel filters-disclosure">
-      <summary>Active filters &amp; state</summary>
-      <div class="tag-row" style="margin-top: var(--space-3)">
-        <span v-for="(value, key) in sessionState.active_filters" :key="key" class="chip" style="cursor: default">
-          {{ key }}: {{ value }}
-        </span>
-        <span v-if="sessionState.resolved_entity" class="chip" style="cursor: default">
-          resolved: {{ sessionState.resolved_entity }}
-        </span>
+      <div v-if="sidebarOpen" class="sidebar-body">
+        <button
+          type="button"
+          class="btn btn-ghost new-chat-btn"
+          :disabled="turnInFlight"
+          @click="startNewChat"
+        >
+          + New chat
+        </button>
+        <p v-if="sessionsLoading && !sessions.length" class="sidebar-hint">Loading…</p>
+        <p v-else-if="sessionsError" class="sidebar-hint error-text">{{ sessionsError }}</p>
+        <p v-else-if="!sessions.length" class="sidebar-hint">No past conversations yet.</p>
+        <ul v-else class="session-list">
+          <li v-for="s in sessions" :key="s.session_id">
+            <button
+              type="button"
+              class="session-item"
+              :class="{ 'session-item-active': s.session_id === sessionId }"
+              :disabled="historyLoading"
+              @click="selectSession(s)"
+            >
+              <span class="session-item-title">{{ s.title || 'New conversation' }}</span>
+              <span class="session-item-time mono">{{ relativeTime(s.updated_at || s.created_at) }}</span>
+            </button>
+          </li>
+        </ul>
       </div>
-    </details>
+    </aside>
 
-    <section class="panel transcript-panel">
-      <div ref="transcriptEl" class="transcript">
-        <p v-if="!messages.length" class="empty-hint">
-          Ask something like "show me eligible ASINs sorted by ROI" to start.
-        </p>
-
-        <template v-for="msg in messages" :key="msg.id">
-          <div v-if="msg.type === 'user'" class="row row-user">
-            <div class="bubble bubble-user">
-              <span class="bubble-label mono">You</span>
-              <p class="bubble-text">{{ msg.content }}</p>
-            </div>
-          </div>
-
-          <div v-else-if="msg.type === 'tool'" class="row row-tool">
-            <div class="tool-card" :class="msg.status">
-              <div class="tool-card-head">
-                <span class="tool-card-name mono">{{ msg.tool }}</span>
-                <span class="tool-card-status mono" :class="{ 'tool-card-status-pending': msg.status === 'pending' }">
-                  {{ msg.status === 'done' ? 'done' : 'running…' }}
-                </span>
-              </div>
-              <p v-if="compactArgs(msg.args)" class="tool-card-line mono">args: {{ compactArgs(msg.args) }}</p>
-              <p v-if="msg.status === 'done' && compactResult(msg.result)" class="tool-card-line mono">
-                {{ compactResult(msg.result) }}
-              </p>
-            </div>
-          </div>
-
-          <div v-else-if="msg.type === 'answer'" class="row row-answer">
-            <div class="bubble bubble-answer">
-              <span class="bubble-label mono">Scout</span>
-              <div class="bubble-text markdown-body" v-html="renderMarkdown(msg.content)"></div>
-            </div>
-          </div>
-
-          <div v-else-if="msg.type === 'error'" class="row row-error">
-            <p class="banner banner-error turn-error">{{ msg.content }}</p>
-          </div>
+    <div class="chat-main">
+      <div
+        v-if="socket.status.value === 'unauthorized' || socket.status.value === 'error'"
+        class="banner banner-error"
+      >
+        <template v-if="socket.status.value === 'unauthorized'">
+          Your session expired or is invalid.
+          <router-link to="/login">Log in again</router-link>.
         </template>
+        <template v-else>Couldn't reach the chat service — please try sending your message again.</template>
       </div>
 
-      <form class="composer" @submit.prevent="sendMessage">
-        <textarea
-          id="chat-message"
-          v-model="inputText"
-          name="message"
-          class="composer-input"
-          rows="2"
-          :disabled="!canSend"
-          :placeholder="canSend ? 'Ask about eligibility, ROI, filters, combos…' : 'Waiting for connection…'"
-          aria-label="Message"
-          @keydown.enter.exact.prevent="sendMessage"
-        ></textarea>
-        <button type="submit" class="btn btn-primary" :disabled="!canSend || !inputText.trim()">
-          {{ turnInFlight ? 'Thinking…' : 'Send' }}
-        </button>
-      </form>
-    </section>
+      <p v-if="historyError" class="banner banner-error">
+        {{ historyError }}
+      </p>
+
+      <details v-if="hasActiveFilters" class="panel filters-disclosure">
+        <summary>Active filters &amp; state</summary>
+        <div class="tag-row" style="margin-top: var(--space-3)">
+          <span v-for="(value, key) in sessionState.active_filters" :key="key" class="chip" style="cursor: default">
+            {{ key }}: {{ value }}
+          </span>
+          <span v-if="sessionState.resolved_entity" class="chip" style="cursor: default">
+            resolved: {{ sessionState.resolved_entity }}
+          </span>
+        </div>
+      </details>
+
+      <section class="panel transcript-panel">
+        <div ref="transcriptEl" class="transcript" @scroll.passive="onTranscriptScroll">
+          <p v-if="historyLoading" class="empty-hint">Loading conversation…</p>
+          <p v-else-if="!messages.length" class="empty-hint">
+            Ask something like "show me eligible ASINs sorted by ROI" to start.
+          </p>
+
+          <template v-for="msg in messages" :key="msg.id">
+            <div v-if="msg.type === 'user'" class="row row-user">
+              <div class="bubble bubble-user">
+                <span class="bubble-label mono">You</span>
+                <p class="bubble-text">{{ msg.content }}</p>
+              </div>
+            </div>
+
+            <div v-else-if="msg.type === 'tool'" class="row row-tool">
+              <div class="tool-card" :class="msg.status">
+                <div class="tool-card-head">
+                  <span class="tool-card-name mono">{{ msg.tool }}</span>
+                  <span class="tool-card-status mono" :class="{ 'tool-card-status-pending': msg.status === 'pending' }">
+                    {{ msg.status === 'done' ? 'done' : 'running…' }}
+                  </span>
+                </div>
+                <p v-if="compactArgs(msg.args)" class="tool-card-line mono">args: {{ compactArgs(msg.args) }}</p>
+                <p v-if="msg.status === 'done' && compactResult(msg.result)" class="tool-card-line mono">
+                  {{ compactResult(msg.result) }}
+                </p>
+              </div>
+            </div>
+
+            <div v-else-if="msg.type === 'answer'" class="row row-answer">
+              <div class="bubble bubble-answer">
+                <span class="bubble-label mono">Scout</span>
+                <div class="bubble-text markdown-body" v-html="renderMarkdown(msg.content)"></div>
+              </div>
+            </div>
+
+            <div v-else-if="msg.type === 'error'" class="row row-error">
+              <p class="banner banner-error turn-error">{{ msg.content }}</p>
+            </div>
+          </template>
+        </div>
+
+        <form class="composer" @submit.prevent="sendMessage">
+          <textarea
+            id="chat-message"
+            v-model="inputText"
+            name="message"
+            class="composer-input"
+            rows="2"
+            :disabled="!canSend"
+            :placeholder="canSend ? 'Ask about eligibility, ROI, filters, combos…' : 'Scout is thinking…'"
+            aria-label="Message"
+            @keydown.enter.exact.prevent="sendMessage"
+          ></textarea>
+          <button type="submit" class="btn btn-primary" :disabled="!canSend || !inputText.trim()">
+            {{ turnInFlight ? 'Thinking…' : 'Send' }}
+          </button>
+        </form>
+      </section>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.chat-head {
+.chat-layout {
   display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--space-4);
-  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-5);
 }
 
-.chat-head-right {
+.chat-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-sidebar {
+  flex: 0 0 16rem;
+  padding: var(--space-4);
+  position: sticky;
+  top: var(--space-5);
+}
+
+.chat-sidebar-collapsed {
+  flex-basis: auto;
+  padding: var(--space-3) var(--space-4);
+}
+
+.sidebar-head {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
-  padding-bottom: var(--space-3);
+  justify-content: space-between;
+  gap: var(--space-3);
 }
 
-.session-tag {
-  font-family: var(--font-mono);
+.sidebar-title {
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+}
+
+.sidebar-body {
+  margin-top: var(--space-3);
+}
+
+.new-chat-btn {
+  width: 100%;
+  padding: var(--space-2) var(--space-4);
+  margin-bottom: var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.sidebar-hint {
+  font-size: var(--text-xs);
+  color: var(--steel);
+  margin: 0;
+}
+
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 30rem;
+  overflow-y: auto;
+}
+
+.session-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+
+.session-item:hover:not(:disabled) {
+  background: var(--paper);
+  border-color: var(--line);
+}
+
+.session-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.session-item-active {
+  background: var(--blue-soft);
+  border-color: var(--blue);
+}
+
+.session-item-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.session-item-time {
   font-size: var(--text-xs);
   color: var(--steel);
 }
 
+.session-item-active .session-item-time {
+  color: var(--blue-dark);
+}
+
+@media (max-width: 56rem) {
+  .chat-layout {
+    flex-direction: column;
+  }
+
+  .chat-sidebar {
+    flex-basis: auto;
+    width: 100%;
+    position: static;
+  }
+
+  .session-list {
+    max-height: 14rem;
+  }
+}
+
+/* The chat screen is an app view, not a document page — trim the .page
+   shell's generous editorial padding down to app chrome so the transcript
+   gets the vertical space instead. Scoped styles can't reach the parent
+   AppShell element, hence :global + :has. */
+:global(.page:has(.chat-layout)) {
+  padding: var(--space-4) 0;
+}
+
+.chat-main > .banner {
+  margin: 0 0 var(--space-5);
+}
+
 .filters-disclosure {
-  margin-top: var(--space-5);
+  margin: 0 0 var(--space-5);
   padding: var(--space-4) var(--space-5);
 }
 
@@ -377,7 +694,6 @@ function startNewChat() {
 }
 
 .transcript-panel {
-  margin-top: var(--space-5);
   display: flex;
   flex-direction: column;
   padding: 0;
@@ -550,6 +866,10 @@ function startNewChat() {
 }
 
 .markdown-body :deep(table) {
+  /* display:block + overflow-x so a wide LLM-generated table scrolls inside
+     the bubble instead of blowing the transcript open horizontally. */
+  display: block;
+  overflow-x: auto;
   width: 100%;
   margin: var(--space-2) 0;
   font-size: var(--text-xs);
@@ -559,5 +879,59 @@ function startNewChat() {
   font-family: var(--font-mono);
   background: var(--paper);
   padding: 0 0.2em;
+}
+
+/* Desktop: the whole chat view fits the viewport — exactly one scrollbar
+   (inside the transcript), composer always on screen, no page-level
+   scrolling to find the input and no scroll-inside-scroll. 6.5rem accounts
+   for the 4.5rem header plus the trimmed --space-4 top/bottom .page padding
+   (see the :global(.page:has(.chat-layout)) override above). Mobile (the
+   max-width query above) keeps the stacked, naturally-flowing layout. */
+@media (min-width: 56.0625rem) {
+  .chat-layout {
+    height: max(28rem, calc(100vh - 6.5rem));
+    align-items: stretch;
+  }
+
+  .chat-sidebar {
+    position: static;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  /* A collapsed sidebar is just its head row — don't stretch it into a
+     tall empty column. */
+  .chat-sidebar-collapsed {
+    align-self: flex-start;
+  }
+
+  .sidebar-body {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .session-list {
+    max-height: none;
+  }
+
+  .chat-main {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+
+  .transcript-panel {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .transcript {
+    /* Keep a usable floor even on short viewports (the panel then overflows
+       the viewport-fit height and the page scrolls a little — better than a
+       letterbox-thin transcript). */
+    min-height: 14rem;
+    max-height: none;
+  }
 }
 </style>
