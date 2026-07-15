@@ -1,6 +1,6 @@
 """get_current_user — the unified auth dependency from ARCHITECTURE.md §3.2.
 
-Every protected route (later phases: /upc, /eligibility, /ask, /chat,
+Every protected route (later phases: /upc, /eligibility, /chat,
 /refresh) is expected to depend on this via `Depends(get_current_user)` to
 get back a `User` ORM instance (`.id`, `.email`, ...). It reads the
 `Authorization: Bearer <token>` header, hashes the token, and looks it up in

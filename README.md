@@ -1,7 +1,8 @@
 # Keepa Scout
 
-Amazon 套利分析服务：ASIN eligibility/ROI 判定、Keepa 数据 ETL、自然语言问答（`/ask`）、
-多轮上下文 AI 助手（`/chat`，LangGraph 驱动）、后台全量刷新（`/refresh`，Celery + 每日定时）。
+Amazon 套利分析服务：ASIN eligibility/ROI 判定、Keepa 数据 ETL、自然语言提问与多轮上下文
+AI 助手（`/chat`，LangGraph 驱动；原 `/ask` 已合并入它，见下文）、后台全量刷新
+（`/refresh`，Celery + 每日定时）。
 
 设计文档：[`ARCHITECTURE.md`](ARCHITECTURE.md)（系统架构/ER/时序图）、
 [`HARNESS.md`](HARNESS.md)（每项能力的目标/验收标准/证据）。笔试题原始材料在
@@ -32,10 +33,10 @@ docker compose up --build -d
 
 **已知环境限制**：本仓库开发/验证过程中所在的沙箱连不上 `api.keepa.com`（DNS 解析到
 一个网络测试用的哨兵地址，不是本项目的 bug）。所以下面 `/upc`、ETL 的真实 Keepa 数据是
-在具备正常网络的环境下才能验证；本仓库里跑的所有 `/eligibility`/`/ask`/`/chat` 示例，
+在具备正常网络的环境下才能验证；本仓库里跑的所有 `/eligibility`/`/chat` 示例，
 底层数据是一批**灌进真实 ETL 管线（`app/ingest.py`）的合成 fixture**（不是手造的假 JSON
 响应），标题带 "Synthetic Dev Fixture Item" 字样可辨认。DeepSeek（LLM）在这个环境里是能
-连通的，所有 `/ask`/`/chat` 示例都是真实模型调用产生的结果，不是 mock。
+连通的，所有 `/chat` 示例都是真实模型调用产生的结果，不是 mock。
 
 ## 鉴权（强制，无匿名回退——见 ARCHITECTURE.md 顶部说明）
 
@@ -82,27 +83,33 @@ curl -X POST localhost:8000/refresh -H "Authorization: Bearer $TOKEN"
 curl localhost:8000/refresh/status -H "Authorization: Bearer $TOKEN"
 ```
 
-### `POST /ask`
+### 自然语言提问（原 `POST /ask`——已移除，改经 `/chat`）
 
-5 条真实跑过的示例（[`scripts/verify_chat.py`](scripts/verify_chat.py) 和开发过程里都
-实测过，非题目原句的复述）：
+> **主动的题面偏离**（详见 ARCHITECTURE.md 开头"偏离②"）：`/ask` 在功能上是 `/chat` 的
+> 严格子集（同一套 NL→SQL 安全校验、同一个执行入口，但无多轮/无状态/无偏好），保留两条
+> 并行管线只有维护成本。端点已整体移除；题目 7 类示例问题全部改经 `/chat` 提问，效果相同
+> 且引用真实数据。SQL 安全校验（SELECT-only/单语句/禁 DDL-DML）由
+> `tests/test_tool_run_readonly_sql.py` 在工具层持续覆盖。
+
+5 条真实跑过的示例（非题目原句的复述；`SID` 为任意新会话 id）：
 
 ```bash
-curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"question":"How many ASINs currently pass all the eligibility checks?"}'
+SID=$(uuidgen)
+curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d "{\"session_id\":\"$SID\",\"message\":\"How many ASINs currently pass all the eligibility checks?\"}"
 
-curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"question":"Give me the 5 best-ROI ASINs where Amazon is not the dominant seller."}'
+curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d "{\"session_id\":\"$SID\",\"message\":\"Give me the 5 best-ROI ASINs where Amazon is not the dominant seller.\"}"
 
-curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"question":"Why doesn'\''t B006JVZXJM qualify as eligible?"}'
+curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d "{\"session_id\":\"$SID\",\"message\":\"Why doesn't B006JVZXJM qualify as eligible?\"}"
 
-curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"question":"If you had to pick one ASIN to resell right now, which would it be and why?"}'
+curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d "{\"session_id\":\"$SID\",\"message\":\"If you had to pick one ASIN to resell right now, which would it be and why?\"}"
 
-curl -X POST localhost:8000/ask -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" -d '{"question":"What'\''s the weather forecast for tomorrow?"}'
-# -> {"answer":"I can only help with Amazon ASIN arbitrage analysis.","sql":null,"out_of_scope":true,"rows":[]}
+curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" -d "{\"session_id\":\"$SID\",\"message\":\"What is the weather forecast for tomorrow?\"}"
+# -> {"answer":"I can only help with Amazon ASIN arbitrage analysis.", ...}   # 域外拒答，session 状态不丢
 ```
 
 ### `POST /chat`

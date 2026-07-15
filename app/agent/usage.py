@@ -49,11 +49,10 @@ from app.models.usage import LlmUsageLog
 
 
 class TokenUsageCollector(AsyncCallbackHandler):
-    """Pass one instance per top-level `graph.ainvoke()` (or per `/ask`
-    request) via `config={"callbacks": [collector]}` -- it aggregates
-    across every LLM call that happens during that invocation (a `/chat`
-    turn can trigger 1-N calls across tool-calling rounds; `/ask` makes
-    exactly 1-2)."""
+    """Pass one instance per top-level `graph.ainvoke()` via
+    `config={"callbacks": [collector]}` -- it aggregates across every LLM
+    call that happens during that invocation (a `/chat` turn can trigger
+    1-N calls across tool-calling rounds)."""
 
     def __init__(self) -> None:
         self.input_tokens = 0

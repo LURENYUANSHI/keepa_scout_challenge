@@ -57,7 +57,7 @@ def sessions_client(test_engine):
                 # process-wide singleton engine whose asyncpg pool binds to
                 # whichever event loop first checks a connection out of it.
                 # Earlier test modules in the same `pytest` run (e.g.
-                # tests/test_ask_examples.py's `real_client`, which talks to
+                # earlier real-LLM test modules whose fixtures talked to
                 # this exact production engine on pytest-asyncio's
                 # *session*-scoped loop, never disposing it) can leave that
                 # pool populated with connections bound to a DIFFERENT loop

@@ -16,7 +16,7 @@ class LlmUsageLog(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
-    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)  # null for /ask
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)  # null on historical rows from the removed /ask endpoint
     endpoint: Mapped[str] = mapped_column(Text, nullable=False)  # ask / chat
     model: Mapped[str] = mapped_column(Text, nullable=False)
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

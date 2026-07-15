@@ -1,10 +1,9 @@
-"""Shared `ChatOpenAI` construction — the one place both app/agent/graph.py
-(the `/chat` agent, tool-bound + streaming) and app/routers/ask.py (the
-`/ask` triage/format calls, plain + non-streaming) build their LLM client
+"""Shared `ChatOpenAI` construction — the one place LLM clients get built
 from, so the base_url/api_key/model wiring to `settings` exists in exactly
-one place. Pure construction, no behavior of either caller changed by this
-extraction -- graph.py still gets a streaming+tool-bound client, ask.py
-still gets a plain one, each just asks for what it needs.
+one place. app/agent/graph.py (the `/chat` agent, tool-bound + streaming)
+is the sole remaining caller since the `/ask` endpoint's removal; kept as
+its own module anyway -- the provider-wiring seam is where the next
+consumer (a batch summarizer, an eval harness) would plug in.
 """
 from langchain_openai import ChatOpenAI
 

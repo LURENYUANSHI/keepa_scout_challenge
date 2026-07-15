@@ -3,7 +3,7 @@
 Phase 1 (this file, as scaffolded): app boots, DB tables get created, and a
 public /health check exists. Phase 3a adds /upc and /eligibility. Phase 4
 (this revision) adds the LangGraph checkpointer/store lifecycle and the
-/ask, /chat routers.
+/chat router.
 """
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -16,7 +16,7 @@ from app.agent.graph import build_graph
 from app.agent.store import store_lifespan
 from app.config import settings
 from app.db import init_db
-from app.routers import ask, auth, chat, eligibility, refresh, upc
+from app.routers import auth, chat, eligibility, refresh, upc
 
 
 @asynccontextmanager
@@ -72,5 +72,4 @@ app.include_router(auth.router)
 app.include_router(upc.router)
 app.include_router(eligibility.router)
 app.include_router(refresh.router)
-app.include_router(ask.router)
 app.include_router(chat.router)

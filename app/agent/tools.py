@@ -543,7 +543,7 @@ def validate_readonly_sql(sql: str) -> str | None:
 
 
 async def run_readonly_sql_impl(session: AsyncSession, sql: str) -> dict[str, Any]:
-    """Callers (app/agent/graph.py's tools_node, app/routers/ask.py) are
+    """Callers (app/agent/graph.py's tools_node) are
     expected to pass a session that hasn't run other statements in the same
     transaction yet where possible -- but this function doesn't assume it.
 
@@ -552,16 +552,15 @@ async def run_readonly_sql_impl(session: AsyncSession, sql: str) -> dict[str, An
     the validator above. That was dropped: Postgres requires `SET
     TRANSACTION` to be the very first statement in a transaction, which
     doesn't hold when this runs on a session that's already executed prior
-    queries in the same request (e.g. `/ask`'s auth-dependency session, or
-    `/chat`'s tools_node when `run_readonly_sql` isn't the first tool call
-    in a multi-tool-call round) -- it would raise instead of protecting
-    anything. The actual safety net is: (1) `validate_readonly_sql` above
-    is SELECT-only / single-statement / DDL-DML-blocklisted, and (2) this
-    function never calls `commit()` -- whatever session it's given, the
-    caller is responsible for not committing it afterward with unrelated
-    writes still pending (app/routers/ask.py and app/agent/graph.py's
-    tools_node both use a session dedicated to read-only tool work, never
-    the session that later commits `llm_usage_log`).
+    queries in the same request (`/chat`'s tools_node when
+    `run_readonly_sql` isn't the first tool call in a multi-tool-call
+    round) -- it would raise instead of protecting anything. The actual
+    safety net is: (1) `validate_readonly_sql` above is SELECT-only /
+    single-statement / DDL-DML-blocklisted, and (2) this function never
+    calls `commit()` -- whatever session it's given, the caller is
+    responsible for not committing it afterward with unrelated writes
+    still pending (tools_node uses a session dedicated to read-only tool
+    work, never the session that later commits `llm_usage_log`).
     """
     error = validate_readonly_sql(sql)
     if error:

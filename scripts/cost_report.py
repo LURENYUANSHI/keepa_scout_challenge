@@ -82,7 +82,7 @@ def _print_llm_usage_report() -> None:
         return
 
     if not totals_raw:
-        print("  No rows in llm_usage_log yet (no /ask or /chat calls have been made).")
+        print("  No rows in llm_usage_log yet (no /chat calls have been made).")
         return
 
     input_tok, output_tok, total_tok, n_calls = totals_raw.split("|")
