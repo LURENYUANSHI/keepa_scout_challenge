@@ -128,6 +128,20 @@ curl -X POST localhost:8000/chat -H "Authorization: Bearer $TOKEN" -H "Content-T
 Vue 3 SPA，`http://localhost:5173`（`docker compose up` 已包含）。截图在
 `candidate_package/test_evidence/phase5/`。
 
+## 演示（真实数据，非 mock）
+
+`candidate_package/test_evidence/phase7/e2e/` 是一次完整的真实浏览器端到端走查（chrome-devtools
+驱动，非截图拼接），覆盖注册 → 登录 → ASIN lookup → UPC 查询 → `/chat` 两轮对话（filter →
+指代消解"the first one"），全程真实 Keepa 数据、真实 DeepSeek 调用、0 个 console 报错：
+
+| 步骤 | 截图 |
+|---|---|
+| 登录/注册 | `01_login.png` / `02_register_filled.png` |
+| ASIN lookup（真实 Keepa 数据，"Rejected: amazon_pct" 等真实拒绝原因） | `03_asin_lookup_real_data.png` |
+| UPC 查询（真实触发了 Keepa 429 限流，错误干净展示，没有崩） | `04_upc_rate_limited.png` |
+| `/chat` 第一轮：`build_filter_sql` 工具调用 → 9 条真实 eligible ASIN 排名 | `05_chat_turn1_pending.png` / `06_chat_turn1_real_data.png` |
+| `/chat` 第二轮："the first one" 正确指代消解到 `B0H35GBG5V`，含真实价格异常检测（当前价比 90 天均价低 83%） | `07_chat_turn2_reference_resolution.png` |
+
 ## 成本核算
 
 ```bash
