@@ -59,9 +59,55 @@
                     人类：确认提交方式(fork推送)，验证网络诊断细节。
                     AI：起草文档、提交、真实数据验证。
 
-07-15 17:11-       进行中：发现 /chat 的最终回答文本不是真正的 token 级流式输出（工具调用是
-                    增量推送的，但答案文字是生成完一次性推送），修复中；随后计划把前端组件库
-                    换成 PrimeVue。
-                    人类：实测发现流式问题，定优先级(先修流式再换UI库)，选定 PrimeVue。
-                    AI：诊断 + 修复中。
+07-15 17:11-18:05  修复 /chat 真 token 级流式（agent_node 内接 event_sink 队列桥接，不再等
+                    ainvoke 返回后一次性推送）。调试过程中用原始 WS 探针复现出一个更严重的
+                    真实 bug：工具结果里带 Postgres NUMERIC(Decimal) 时 send_json 序列化
+                    崩溃、整条 WS 连接无 close frame 直接死——这正是"前端看起来不流式/卡住"
+                    的部分根因。修复(自定义 JSON encoder + send_text) + 3 个回归测试。
+                    期间还确认了 chrome-devtools 的 list_network_requests 不显示 WS 连接，
+                    属工具限制，之前用它的空输出当论据是错的，已收回。
+                    人类：坚持"看不到流式/看不到 WS"的实测观察，不接受 AI 的错误辩解，
+                    直接推动查到真 bug；要求去掉打字机光标特效只留流式。
+                    AI：WS 探针复现、抓全栈 traceback、修复、回归测试。(commit 18:05)
+
+07-15 18:05-18:17  WS 连接模型第一次修改：从"进页面就连"改为懒连接（首次发消息才握手），
+                    解决"进 chat 页白白挂一条连接"的问题。
+                    人类：指出进页面就看到 WS 不合理。AI：实现 + 验证。(commit 18:17)
+
+07-15 18:17-18:47  两线并行：①熵减（另一个审计 agent 的重复代码报告落地：共享 LLM 构造、
+                    /ask 的 usage 日志 try/finally 化、密码长度常量去重；用户明确约束
+                    "计算逻辑不动"，两处涉及计算/prompt 的合并建议被搁置）；②后台子 agent
+                    实现会话历史功能（title/updated_at 列、GET /chat/sessions、checkpoint
+                    历史回放端点、前端侧栏），真实浏览器验证，顺带修掉一个跨测试模块
+                    事件循环绑定导致的既有 flaky。审计 agent 曾建议删除"冗余的 /ask"，
+                    被驳回——/ask 是题目 6 个必做端点之一，不因前端不调用而删。
+                    人类：给出熵减范围约束；驳回删 /ask 的建议；要求会话历史功能。
+                    AI：主控做熵减+验收，子 agent 做历史功能。(证据 18:44)
+
+07-15 18:47-19:09  用户指出侧栏"都是 New conversation 没法区分"+ URL 必须带 session id。
+                    落地 /chat/:sessionId 路由 + NULL title 从 checkpoint 首条消息回填。
+                    排查"前端连不上 API"时发现真凶：一个周日起就在宿主机裸跑的
+                    python -m app.main 进程一直占着 8000 端口、间歇性遮蔽 Docker 里的真 API
+                    ——杀掉后 IPv4/IPv6 全通。
+                    人类：指出侧栏可用性问题、要求显式路由。AI：实现 + 排查端口占用。
+
+07-15 19:09-19:48  参考另一项目(legal_web)的 WS 模式，按用户要求把连接模型第二次重构：
+                    每条消息开一条全新 WS、回合结束即关——不再有跨回合长连接，也就不再需要
+                    重连/心跳状态机。过程中修掉两个真 bug：①currentAnswerMessage 声明位置
+                    在 immediate watcher 之后，带历史的会话每次刷新都 TDZ ReferenceError；
+                    ②新会话查历史必 404 刷 console 红字，改为后端对从未用过的 session id
+                    返回 200+[]（语义上"还没有消息的对话"，不泄露信息）。
+                    人类：给出参考项目、拍板每消息一连接、逐条追问异常输出（404、空
+                    session_state、拒答文案）直到解释/修复清楚。
+                    AI：重构 + 浏览器实测 + 修 bug。(refactor commit 19:48)
+
+07-15 19:48-20:00  提交门禁（本仓库 .claude/skills 配置的 pre-commit 流程）：auto-test-writer
+                    要求补齐未覆盖函数——给 title 回填补了 3 个测试，当场逮到一个真 bug
+                    （commit 后访问被 server-onupdate expire 的属性 → MissingGreenlet），
+                    修复后全量 218 通过；code-review-eval 走完最小化/副作用/破坏性/覆盖
+                    检查（纯样式改动拆独立 commit），风险 Low；/chat 验收脚本 5/5（含重启
+                    存活）。4 个 commit 推送 fork。(commits 19:48-20:00)
+
+07-15 20:00-       收尾中：核对 CHALLENGE.md 全项完成度（功能全齐；/ask 维持后端-only 的
+                    既有决定；剩余缺口=README 的录屏/GIF + Loom 视频），更新本文件与 REPORT。
 ```

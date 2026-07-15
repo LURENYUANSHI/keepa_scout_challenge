@@ -1,29 +1,28 @@
 === cost_report.py — Keepa Scout cost accounting ===
 
 === LLM token usage (llm_usage_log) ===
-  LLM: 811,435 input / 77,429 output / 888,864 total tokens across 406 call(s)
+  LLM: 1,496,215 input / 142,474 output / 1,638,689 total tokens across 769 call(s)
 
   --- breakdown by endpoint / model ---
   endpoint       model                  calls      input     output      total
-  ask            deepseek-chat            325    308,532     39,907    348,439
-  chat           deepseek-chat             71    431,276     32,188    463,464
-  chat_stream    deepseek-chat             10     71,627      5,334     76,961
+  ask            deepseek-chat            591    580,207     72,363    652,570
+  chat           deepseek-chat            107    629,040     46,396    675,436
+  chat_stream    deepseek-chat             71    286,968     23,715    310,683
 
   --- breakdown by user (top 10 by total tokens) ---
   chat-verify-1784102625@example.com          16 calls   105,187 tokens
+  chat-verify-1784103633@example.com          16 calls   104,587 tokens
   chat-verify-1784102499@example.com          15 calls    99,377 tokens
+  chat-verify-1784116644@example.com          16 calls    96,588 tokens
   chat-verify-1784102640@example.com          11 calls    75,809 tokens
   chat-verify-1784102512@example.com          11 calls    75,465 tokens
   phase4test2_1784098633@example.com          15 calls    68,585 tokens
+  demo@scout.local                            23 calls    67,734 tokens
+  streaming-verify-20260715@example.com       10 calls    45,497 tokens
   chatverify@example.com                       3 calls    34,055 tokens
-  phase4_verify@example.com                    4 calls    30,488 tokens
-  chatverify2@example.com                      3 calls    25,912 tokens
-  ws-verify-b9fbd774ae314432a884092970540dc7@example.com     2 calls     8,538 tokens
-  ws-verify-6ef1ff89d5964eed908abc0d86b035a8@example.com     2 calls     8,456 tokens
 
 === Keepa token balance (GET /token, free, no token cost) ===
   key #1 (8fjl8k...v4qs): UNREACHABLE — unreachable: _ssl.c:1112: The handshake operation timed out
   key #2 (2hopk7...6t0c): UNREACHABLE — unreachable: _ssl.c:1112: The handshake operation timed out
 
   NOTE: if every key above is UNREACHABLE, Keepa itself could not be reached from wherever this script is running (network/DNS/firewall) -- this is an environment issue, not a bug in this script or in the app's Keepa client.
-EXIT CODE: 0
