@@ -22,10 +22,10 @@ import json
 
 from fastapi import APIRouter, Depends
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.graph import OUT_OF_SCOPE_MESSAGE
+from app.agent.llm import build_chat_llm
 from app.agent.tools import run_readonly_sql_impl, validate_readonly_sql
 from app.agent.usage import TokenUsageCollector, log_usage
 from app.auth.dependencies import get_current_user
@@ -103,13 +103,11 @@ instead of inventing an answer. Keep it concise."""
 _MAX_ROWS_IN_PROMPT = 50
 
 
-def _build_llm(*, temperature: float = 0.0) -> ChatOpenAI:
-    return ChatOpenAI(
-        base_url=settings.LLM_BASE_URL,
-        api_key=settings.LLM_API_KEY,
-        model=settings.LLM_MODEL,
-        temperature=temperature,
-    )
+def _build_llm(*, temperature: float = 0.0):
+    # Plain, non-streaming, non-tool-bound -- unlike app.agent.graph's
+    # build_chat_llm() call (streaming=True, tool-bound), /ask's two LLM
+    # calls are each a single blocking request/response.
+    return build_chat_llm(temperature=temperature)
 
 
 def _strip_sql_fences(text: str) -> str:
@@ -142,126 +140,97 @@ async def ask(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
+    # Every return path below logs the same collector to the same place --
+    # a `finally` means that's written once, not copy-pasted at each of the
+    # (five) places this function can return, and it still fires even if
+    # something above raises before reaching a `return`.
     collector = TokenUsageCollector()
-    triage_llm = _build_llm()
-
-    triage_response = await triage_llm.ainvoke(
-        [
-            SystemMessage(content=TRIAGE_SYSTEM_PROMPT),
-            HumanMessage(content=body.question),
-        ],
-        config={"callbacks": [collector]},
-    )
-    raw = (triage_response.content or "").strip()
-    upper = raw.upper()
-
-    if upper == "OUT_OF_SCOPE" or upper.startswith("OUT_OF_SCOPE"):
-        response = _refusal()
-        await log_usage(
-            db,
-            user_id=user.id,
-            session_id=None,
-            endpoint="ask",
-            model=settings.LLM_MODEL,
-            collector=collector,
+    try:
+        triage_llm = _build_llm()
+        triage_response = await triage_llm.ainvoke(
+            [
+                SystemMessage(content=TRIAGE_SYSTEM_PROMPT),
+                HumanMessage(content=body.question),
+            ],
+            config={"callbacks": [collector]},
         )
-        return response
+        raw = (triage_response.content or "").strip()
+        upper = raw.upper()
 
-    if upper.startswith("DIRECT:"):
-        answer = raw.split(":", 1)[1].strip()
-        await log_usage(
-            db,
-            user_id=user.id,
-            session_id=None,
-            endpoint="ask",
-            model=settings.LLM_MODEL,
-            collector=collector,
+        if upper == "OUT_OF_SCOPE" or upper.startswith("OUT_OF_SCOPE"):
+            return _refusal()
+
+        if upper.startswith("DIRECT:"):
+            answer = raw.split(":", 1)[1].strip()
+            return {"answer": answer, "sql": None, "out_of_scope": False, "rows": [], "row_count": 0}
+
+        # --- SQL path -------------------------------------------------
+        sql = _strip_sql_fences(raw)
+
+        validation_error = validate_readonly_sql(sql)
+        if validation_error is not None:
+            # Same safety-critical validator run_readonly_sql (the /chat
+            # tool) uses -- see HARNESS.md §6: a destructive request must
+            # never actually execute, whether the model refused outright
+            # above or (as a defense-in-depth backstop) slipped a
+            # disallowed statement past the triage step.
+            return _refusal()
+
+        # A dedicated, fresh session for the raw-SQL execution -- NOT the
+        # `db` session `get_current_user` already ran auth queries on.
+        # Besides keeping this the same pattern app/agent/graph.py's
+        # tools_node uses, it guarantees this session is never the one
+        # `log_usage()` commits below (see run_readonly_sql_impl's
+        # docstring for why that matters).
+        async with async_session_maker() as sql_session:
+            exec_result = await run_readonly_sql_impl(sql_session, sql)
+        if "error" in exec_result:
+            return {
+                "answer": f"I couldn't run that query against the catalog: {exec_result['error']}",
+                "sql": sql,
+                "out_of_scope": False,
+                "rows": [],
+                "row_count": 0,
+            }
+
+        rows = exec_result["rows"]
+        row_count = exec_result["row_count"]
+
+        format_llm = _build_llm()
+        rows_for_prompt = rows[:_MAX_ROWS_IN_PROMPT]
+        truncated_note = (
+            f" (showing first {_MAX_ROWS_IN_PROMPT} of {row_count} rows)"
+            if row_count > _MAX_ROWS_IN_PROMPT
+            else ""
         )
-        return {"answer": answer, "sql": None, "out_of_scope": False, "rows": [], "row_count": 0}
-
-    # --- SQL path ---------------------------------------------------------
-    sql = _strip_sql_fences(raw)
-
-    validation_error = validate_readonly_sql(sql)
-    if validation_error is not None:
-        # Same safety-critical validator run_readonly_sql (the /chat tool)
-        # uses -- see HARNESS.md §6: a destructive request must never
-        # actually execute, whether the model refused outright above or
-        # (as a defense-in-depth backstop) slipped a disallowed statement
-        # past the triage step.
-        response = _refusal()
-        await log_usage(
-            db,
-            user_id=user.id,
-            session_id=None,
-            endpoint="ask",
-            model=settings.LLM_MODEL,
-            collector=collector,
+        format_response = await format_llm.ainvoke(
+            [
+                SystemMessage(content=FORMAT_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=(
+                        f"Question: {body.question}\n"
+                        f"SQL: {sql}\n"
+                        f"Rows{truncated_note} (JSON): {json.dumps(rows_for_prompt, default=str)}\n\n"
+                        "Answer the question using only these rows."
+                    )
+                ),
+            ],
+            config={"callbacks": [collector]},
         )
-        return response
 
-    # A dedicated, fresh session for the raw-SQL execution -- NOT the
-    # `db` session `get_current_user` already ran auth queries on. Besides
-    # keeping this the same pattern app/agent/graph.py's tools_node uses,
-    # it guarantees this session is never the one `log_usage()` commits
-    # below (see run_readonly_sql_impl's docstring for why that matters).
-    async with async_session_maker() as sql_session:
-        exec_result = await run_readonly_sql_impl(sql_session, sql)
-    if "error" in exec_result:
-        await log_usage(
-            db,
-            user_id=user.id,
-            session_id=None,
-            endpoint="ask",
-            model=settings.LLM_MODEL,
-            collector=collector,
-        )
         return {
-            "answer": f"I couldn't run that query against the catalog: {exec_result['error']}",
+            "answer": format_response.content,
             "sql": sql,
             "out_of_scope": False,
-            "rows": [],
-            "row_count": 0,
+            "rows": rows,
+            "row_count": row_count,
         }
-
-    rows = exec_result["rows"]
-    row_count = exec_result["row_count"]
-
-    format_llm = _build_llm()
-    rows_for_prompt = rows[:_MAX_ROWS_IN_PROMPT]
-    truncated_note = (
-        f" (showing first {_MAX_ROWS_IN_PROMPT} of {row_count} rows)"
-        if row_count > _MAX_ROWS_IN_PROMPT
-        else ""
-    )
-    format_response = await format_llm.ainvoke(
-        [
-            SystemMessage(content=FORMAT_SYSTEM_PROMPT),
-            HumanMessage(
-                content=(
-                    f"Question: {body.question}\n"
-                    f"SQL: {sql}\n"
-                    f"Rows{truncated_note} (JSON): {json.dumps(rows_for_prompt, default=str)}\n\n"
-                    "Answer the question using only these rows."
-                )
-            ),
-        ],
-        config={"callbacks": [collector]},
-    )
-
-    await log_usage(
-        db,
-        user_id=user.id,
-        session_id=None,
-        endpoint="ask",
-        model=settings.LLM_MODEL,
-        collector=collector,
-    )
-
-    return {
-        "answer": format_response.content,
-        "sql": sql,
-        "out_of_scope": False,
-        "rows": rows,
-        "row_count": row_count,
-    }
+    finally:
+        await log_usage(
+            db,
+            user_id=user.id,
+            session_id=None,
+            endpoint="ask",
+            model=settings.LLM_MODEL,
+            collector=collector,
+        )

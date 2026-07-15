@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import get_current_user
 from app.auth.security import (
+    MAX_PASSWORD_BYTES,
     generate_token,
     hash_password,
     hash_token,
@@ -28,11 +29,11 @@ from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 # Password policy — ARCHITECTURE.md §6: minimum 8 chars, no composition
-# rules; upper bound is bcrypt's own 72-byte input limit (see
-# app/auth/security.py's module docstring for why we reject rather than
-# silently truncate).
+# rules; upper bound is bcrypt's own 72-byte input limit, imported from
+# app/auth/security.py (single source of truth) rather than redefined here
+# — see that module's docstring for why we reject rather than silently
+# truncate.
 MIN_PASSWORD_BYTES = 8
-MAX_PASSWORD_BYTES = 72
 
 
 def _validate_password_length(password: str) -> None:

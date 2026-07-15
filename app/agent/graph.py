@@ -66,6 +66,7 @@ from langgraph.store.base import BaseStore
 # `.model_validate()`/`.model_dump()`.
 from pydantic.v1 import ValidationError
 
+from app.agent.llm import build_chat_llm
 from app.agent.state import AgentState
 from app.agent.tools import (
     ALL_TOOLS,
@@ -78,7 +79,6 @@ from app.agent.tools import (
     run_readonly_sql_impl,
     update_preferences_impl,
 )
-from app.config import settings
 from app.db import async_session_maker
 
 # HARNESS.md §6's exact refusal string -- tested verbatim by some graders,
@@ -149,14 +149,7 @@ def _build_llm() -> ChatOpenAI:
     # streamed call in this version, `usage_metadata` moves to each
     # generation's `.message` instead -- confirmed empirically against a
     # real DeepSeek call, not assumed).
-    return ChatOpenAI(
-        base_url=settings.LLM_BASE_URL,
-        api_key=settings.LLM_API_KEY,
-        model=settings.LLM_MODEL,
-        temperature=0,
-        streaming=True,
-        stream_usage=True,
-    ).bind_tools(ALL_TOOLS)
+    return build_chat_llm(temperature=0, streaming=True, stream_usage=True).bind_tools(ALL_TOOLS)
 
 
 async def _session_context_message(state: AgentState, config: RunnableConfig) -> SystemMessage | None:
