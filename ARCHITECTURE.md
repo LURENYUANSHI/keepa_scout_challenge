@@ -304,7 +304,9 @@ sequenceDiagram
 **图 5** `/chat` 单轮编排（两种传输共用同一编排）。图中以 `POST /chat`（同步返回）表示；
 `WS /chat/stream` 走完全相同的编排，区别只在返回方式：每个工具调用发生的当刻推送
 `tool_call_start`/`tool_call_result` 事件对，最终回答按 token 级 `answer_delta` 增量推送
-（`answer_done` 收尾，罕见情况下用 `answer_retract` 撤回被误判为答案的工具前独白），
+（每段以 `answer_done` 收尾；模型在工具调用前写下的内容作为独立答案段保留展示，
+一轮可有多个答案段——早期版本曾用 `answer_retract` 撤回工具前文本，会丢掉混合型问题
+答案的前半段，已移除），
 回合以 `session_state`（成功）或 `error`（失败）事件收束。连接生命周期见图 7。
 
 **为什么这样才对**：上一版里 `build_filter_sql`/`lookup_asin`/`plan_combo` 是代码在"猜"到某个 intent
