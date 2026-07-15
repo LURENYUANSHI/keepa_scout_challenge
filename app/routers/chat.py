@@ -73,7 +73,7 @@ frontend one at a time, not batched until the whole turn finishes):
 import asyncio
 import contextlib
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -86,8 +86,9 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.graph import extract_results, last_ai_text
@@ -101,22 +102,70 @@ from app.schemas.chat import ChatRequest
 
 router = APIRouter(tags=["chat"])
 
+TITLE_MAX_LEN = 60
 
-async def ensure_session_ownership(db: AsyncSession, session_id: str, user: User) -> None:
+
+def _derive_title(message: str) -> str | None:
+    """First ~60 chars of a user's first message in a session, truncated on
+    a word boundary when there's a reasonably close one -- good enough for a
+    session-list label, not meant to be a perfect summary. Returns `None`
+    for an empty/whitespace-only message (leaves `title` NULL rather than
+    storing an empty string, so the frontend's "New conversation" fallback
+    still kicks in)."""
+    text = message.strip()
+    if not text:
+        return None
+    if len(text) <= TITLE_MAX_LEN:
+        return text
+    truncated = text[:TITLE_MAX_LEN]
+    last_space = truncated.rfind(" ")
+    # Only snap to the word boundary if it doesn't throw away too much of
+    # the budget (avoids a near-empty title for one long unbroken token).
+    if last_space > TITLE_MAX_LEN // 2:
+        truncated = truncated[:last_space]
+    return truncated.rstrip() + "…"
+
+
+async def ensure_session_ownership(
+    db: AsyncSession, session_id: str, user: User, message: str | None = None
+) -> None:
     """Shared ownership check (ARCHITECTURE.md §2/§3.2: `chat_sessions` is
     ownership-ONLY, not a state store) -- creates the row on first use,
     otherwise 403s if `session_id` belongs to a different user. Used by
     both `POST /chat` and `WS /chat/stream` so this logic exists in exactly
-    one place."""
+    one place.
+
+    Also does this feature's session-list bookkeeping in the same place
+    rows get created/looked up (per the phase brief): `updated_at` is
+    touched to "now" on creation AND on every subsequent turn for an
+    existing session, and `title` is set exactly once -- from the first
+    ~60 chars of `message` -- the moment it's still NULL, never overwritten
+    by a later turn's message. `message` is optional (callers that aren't
+    inside an actual chat turn, if any ever call this, simply skip the
+    title-setting part) but both existing call sites always pass one.
+    """
+    now = datetime.now(timezone.utc)
     session_row = await db.get(ChatSession, session_id)
     if session_row is None:
-        db.add(ChatSession(session_id=session_id, user_id=user.id))
+        db.add(
+            ChatSession(
+                session_id=session_id,
+                user_id=user.id,
+                title=_derive_title(message) if message else None,
+                updated_at=now,
+            )
+        )
         await db.commit()
     elif session_row.user_id != user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This session_id belongs to a different user.",
         )
+    else:
+        session_row.updated_at = now
+        if session_row.title is None and message:
+            session_row.title = _derive_title(message)
+        await db.commit()
 
 
 def _session_state(result_state: dict[str, Any]) -> dict[str, Any]:
@@ -134,7 +183,7 @@ async def chat(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> dict:
-    await ensure_session_ownership(db, body.session_id, user)
+    await ensure_session_ownership(db, body.session_id, user, body.message)
 
     graph = request.app.state.agent_graph
     collector = TokenUsageCollector()
@@ -343,7 +392,7 @@ async def chat_stream(
                 continue
 
             try:
-                await ensure_session_ownership(db, body.session_id, user)
+                await ensure_session_ownership(db, body.session_id, user, body.message)
             except HTTPException as exc:
                 await _send_error(websocket, str(exc.detail))
                 continue
@@ -351,3 +400,232 @@ async def chat_stream(
             await _run_streaming_turn(websocket=websocket, graph=graph, db=db, user=user, body=body)
     except WebSocketDisconnect:
         pass
+
+
+# --- session list + resume (history replay) -------------------------------
+#
+# Everything below is new surface for the "browse/resume past conversations"
+# feature: `chat_sessions` already tracked ownership + (as of this feature)
+# title/updated_at, but nothing previously read a thread's actual message
+# history back OUT of the checkpointer -- POST /chat and WS /chat/stream
+# only ever write to it (via `graph.ainvoke(..., config=...)`, which
+# implicitly persists through the checkpointer passed to `build_graph` in
+# app/main.py's lifespan). `GET /chat/sessions/{id}/messages` below is the
+# first place this repo reads checkpointed state back out, via
+# `CompiledStateGraph.aget_state(config)` -- verified directly against the
+# installed langgraph==0.2.76 (`langgraph.pregel.Pregel.aget_state`, the
+# base class `StateGraph.compile()` returns), not assumed from newer docs:
+# it returns a `StateSnapshot` namedtuple whose `.values` is the exact same
+# dict shape `graph.ainvoke()` resolves to (confirmed empirically against a
+# real checkpointed thread from this dev DB -- `.values["messages"]` is a
+# plain list of LangChain message objects, in the same append order
+# `agent_node`/`tools_node` produced them turn over turn). For a thread_id
+# with no checkpoint yet, `.values` comes back as `{}` (also confirmed
+# empirically) -- so `.get("messages", [])` naturally yields `[]` rather
+# than raising, which is exactly the "exists but empty -> [], not 404"
+# behavior the phase brief asks for.
+
+
+def _text_content(content: Any) -> str:
+    """Best-effort plain text out of a LangChain message's `.content` --
+    mirrors app/agent/graph.py's `last_ai_text`/`_chunk_text` handling of
+    the same "usually a str, sometimes a list of content blocks"
+    provider-dependent shape."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return ""
+
+
+def _replay_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    """Converts a checkpointed thread's raw LangChain message list (see the
+    module-level note above for exactly how it's fetched) into the SAME
+    `{"type": "user"|"tool"|"answer", ...}` shape
+    frontend/src/views/Chat.vue's `messages` array already uses for live
+    turns, so replayed history renders through the exact same templates --
+    no parallel markup.
+
+    Shape of the source list, per app/agent/graph.py: HumanMessage (one per
+    user turn) / AIMessage with `tool_calls` set (a tool-selection round,
+    never the user-facing answer) / ToolMessage (one per dispatched tool
+    call, linked back to its call via `tool_call_id`) / AIMessage with no
+    `tool_calls` (the turn's real final answer). SystemMessage never lands
+    in checkpointed state -- `agent_node` builds one fresh per LLM call but
+    only ever returns the AIMessage response into state -- so there's
+    nothing to filter there, but a stray one is skipped defensively rather
+    than crashing this endpoint.
+
+    A tool-calling AIMessage's own `.content` (the occasional narration text
+    the model produces despite SYSTEM_PROMPT telling it not to -- see
+    graph.py's `_stream_agent_response` docstring) is intentionally NOT
+    replayed as an `answer` bubble: on the live path that exact text either
+    never streamed at all (system prompt worked that turn) or got sent as
+    `answer_delta`s and then discarded via `answer_retract` (system prompt
+    didn't) -- either way it was never meant to persist as a visible
+    message, so replay shouldn't resurrect it. Each tool_call becomes its
+    own `type: "tool"` entry (`status: "done"` -- this is history, nothing
+    is still running), matched to its result by `tool_call_id` rather than
+    list position, since parallel tool calls don't guarantee the following
+    ToolMessage(s) arrive in the same order the calls were made.
+    """
+    out: list[dict[str, Any]] = []
+    pending_by_call_id: dict[str, dict[str, Any]] = {}
+    seq = 0
+
+    for message in messages:
+        if isinstance(message, HumanMessage):
+            seq += 1
+            out.append({"id": f"h{seq}", "type": "user", "content": _text_content(message.content)})
+        elif isinstance(message, AIMessage):
+            tool_calls = getattr(message, "tool_calls", None) or []
+            if tool_calls:
+                for call in tool_calls:
+                    seq += 1
+                    entry = {
+                        "id": f"h{seq}",
+                        "type": "tool",
+                        "tool": call.get("name"),
+                        "args": call.get("args") or {},
+                        "status": "done",
+                        "result": None,
+                    }
+                    out.append(entry)
+                    call_id = call.get("id")
+                    if call_id:
+                        pending_by_call_id[call_id] = entry
+            else:
+                text = _text_content(message.content)
+                if text.strip():
+                    seq += 1
+                    out.append({"id": f"h{seq}", "type": "answer", "content": text, "streaming": False})
+        elif isinstance(message, ToolMessage):
+            entry = pending_by_call_id.get(message.tool_call_id)
+            if entry is not None:
+                raw = message.content
+                try:
+                    entry["result"] = json.loads(raw) if isinstance(raw, str) else raw
+                except (TypeError, ValueError):
+                    entry["result"] = raw
+
+    return out
+
+
+async def _backfill_title_from_checkpoint(graph: Any, row: ChatSession) -> None:
+    """`ensure_session_ownership` normally sets `title` from the very first
+    message at creation time, but rows created before that logic existed
+    (or before `message` reached it for some other reason -- a crashed
+    first turn, a raw/non-UI client) are left with `title IS NULL` forever,
+    since nothing else ever re-derives it. Rather than showing every such
+    row as an undifferentiated "New conversation" indefinitely, fall back
+    to the same source `GET /chat/sessions/{id}/messages` already reads --
+    the checkpointer's own message history -- and derive it from the first
+    HumanMessage there, exactly like a normal first turn would have. Mutates
+    `row.title` in place; caller is responsible for committing."""
+    snapshot = await graph.aget_state({"configurable": {"thread_id": row.session_id}})
+    for message in (snapshot.values or {}).get("messages", []):
+        if isinstance(message, HumanMessage):
+            title = _derive_title(_text_content(message.content))
+            if title:
+                row.title = title
+            break
+
+
+@router.get("/chat/sessions")
+async def list_chat_sessions(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    """The current user's sessions, most-recently-active first (`updated_at`
+    DESC, `created_at` DESC as the tiebreak/fallback -- spelled out with
+    `nullslast()` per the phase brief even though `updated_at` is NOT NULL
+    end-to-end today, since a row from before this feature shipped could in
+    principle still have a NULL `updated_at` if the manual `ALTER TABLE`
+    backfill ever gets skipped in some other environment).
+
+    `title` can be null (the row exists -- `ensure_session_ownership`
+    creates it eagerly -- but no title-worthy message has landed yet, e.g.
+    the turn crashed before completion, or a race, or the row predates
+    title-on-creation altogether). Rather than show a permanent generic
+    "New conversation" for those, backfill from the checkpointed history
+    (see `_backfill_title_from_checkpoint`) once here and persist it, so
+    this only ever runs once per stale row.
+    """
+    result = await db.execute(
+        select(ChatSession)
+        .where(ChatSession.user_id == user.id)
+        .order_by(ChatSession.updated_at.desc().nullslast(), ChatSession.created_at.desc())
+    )
+    rows = result.scalars().all()
+
+    untitled = [row for row in rows if row.title is None]
+    if untitled:
+        graph = request.app.state.agent_graph
+        for row in untitled:
+            await _backfill_title_from_checkpoint(graph, row)
+
+    # Payload is built BEFORE the commit below, deliberately: committing an
+    # UPDATE on a row whose `updated_at` has a server-side onupdate expires
+    # that attribute on the ORM instance (SQLAlchemy can't know the value
+    # the server just generated), and touching an expired attribute after
+    # the await would need a sync refresh -> MissingGreenlet under async
+    # SQLAlchemy. Reading everything first sidesteps that entirely, and the
+    # response stays consistent with the ordering this query just returned.
+    payload = [
+        {
+            "session_id": row.session_id,
+            "title": row.title,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+        for row in rows
+    ]
+    if untitled:
+        await db.commit()
+    return payload
+
+
+@router.get("/chat/sessions/{session_id}/messages")
+async def get_chat_session_messages(
+    session_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[dict[str, Any]]:
+    """Full replayed message history for one session.
+
+    Ownership-checked inline rather than via `ensure_session_ownership`
+    (that helper only ever creates-a-row-or-403s -- it has no "the row
+    doesn't exist and shouldn't be created" outcome, which is exactly what
+    a GET needs: no side-effecting row creation for a session nobody has
+    ever written to). 403 if the session exists but belongs to a different
+    user.
+
+    A session_id with no row at all returns an empty list, NOT a 404: with
+    URL-based routing (`/chat/:sessionId`, where bare `/chat` redirects to a
+    freshly minted id), a never-used session id is a completely normal
+    state the frontend hits on every single "New chat" -- it genuinely is
+    "a conversation with no messages yet", and treating it as an error
+    would (and did) spam the browser console with a red
+    `Failed to load resource: 404` on every new-chat page load even though
+    the frontend handled it gracefully. No information is leaked by the
+    200: a probed foreign session id that EXISTS still 403s below, and one
+    that doesn't exist looks identical to one the prober could "create"
+    themselves anyway (rows are minted lazily on first message,
+    per-owner). Same reasoning as the exists-but-no-checkpoint case, which
+    also returns [].
+    """
+    session_row = await db.get(ChatSession, session_id)
+    if session_row is None:
+        return []
+    if session_row.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This session_id belongs to a different user.",
+        )
+
+    graph = request.app.state.agent_graph
+    snapshot = await graph.aget_state({"configurable": {"thread_id": session_id}})
+    messages = (snapshot.values or {}).get("messages", [])
+    return _replay_messages(messages)

@@ -104,6 +104,29 @@ def ws_client(test_engine):
     try:
         with patch("app.main.init_db", _noop_init_db):
             with TestClient(app) as tc:
+                # Same "another operation is in progress" hazard as this
+                # fixture's own docstring above, but the cross-MODULE variant:
+                # `app.db.engine`/`async_session_maker` (used directly by
+                # app/agent/graph.py's `tools_node` for every dispatched tool
+                # call, independent of any `get_db` override) is a
+                # process-wide singleton whose asyncpg pool binds to
+                # whichever event loop first checks a connection out of it.
+                # Earlier test modules in the same `pytest` run (e.g.
+                # tests/test_ask_examples.py's `real_client`, which talks to
+                # this exact production engine on pytest-asyncio's
+                # *session*-scoped loop and never disposes it) can leave that
+                # pool populated with connections bound to a DIFFERENT loop
+                # than this fixture's own dedicated TestClient portal
+                # thread/loop -- confirmed empirically: this exact test file
+                # (and tests/test_chat_sessions.py, which hit the identical
+                # failure first and added the identical fix) intermittently
+                # failed its first tool-calling turn with exactly this error
+                # depending on module run order, before this dispose was
+                # added here. Disposing right after entering (so it runs on
+                # THIS fixture's own portal loop, before any test executes)
+                # forces a clean pool that only ever binds to this module's
+                # loop.
+                tc.portal.call(production_engine.dispose)
                 yield tc
                 tc.portal.call(engine.dispose)
                 tc.portal.call(production_engine.dispose)
