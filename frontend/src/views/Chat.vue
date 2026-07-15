@@ -435,7 +435,7 @@ function startNewChat() {
               :disabled="historyLoading"
               @click="selectSession(s)"
             >
-              <span class="session-item-title">{{ s.title || 'New conversation' }}</span>
+              <span class="session-item-title" :title="s.title || ''">{{ s.title || 'New conversation' }}</span>
               <span class="session-item-time mono">{{ relativeTime(s.updated_at || s.created_at) }}</span>
             </button>
           </li>

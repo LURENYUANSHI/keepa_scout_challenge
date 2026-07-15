@@ -104,7 +104,7 @@ def _send_turn(tc: TestClient, token: str, session_id: str, message: str) -> dic
     return resp.json()
 
 
-# --- title derivation + truncation ----------------------------------------
+# --- title derivation (full first message; display clips, storage doesn't) --
 
 
 def test_short_message_becomes_verbatim_title(sessions_client):
@@ -120,7 +120,10 @@ def test_short_message_becomes_verbatim_title(sessions_client):
     assert rows[session_id]["title"] == message
 
 
-def test_long_message_title_is_truncated_to_60_chars_with_ellipsis(sessions_client):
+def test_long_message_title_is_stored_in_full(sessions_client):
+    """Truncation is a presentation concern (the sidebar clips with a CSS
+    ellipsis) -- storage keeps the complete first message, because data
+    clipped at write time can never be recovered by the display layer."""
     token = _register(sessions_client)
     session_id = f"title-long-{uuid.uuid4().hex}"
     message = (
@@ -133,14 +136,7 @@ def test_long_message_title_is_truncated_to_60_chars_with_ellipsis(sessions_clie
 
     resp = sessions_client.get("/chat/sessions", headers={"Authorization": f"Bearer {token}"})
     rows = {r["session_id"]: r for r in resp.json()}
-    title = rows[session_id]["title"]
-    assert title is not None
-    assert title != message
-    # word-boundary truncation + ellipsis marker, and the visible text
-    # itself (excluding the ellipsis) must be within the ~60 char budget.
-    assert title.endswith("…")
-    assert len(title) - 1 <= 60
-    assert message.startswith(title[:-1].rstrip())
+    assert rows[session_id]["title"] == message
 
 
 def test_title_set_once_never_overwritten_by_later_turns(sessions_client):

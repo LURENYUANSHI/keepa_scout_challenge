@@ -102,28 +102,16 @@ from app.schemas.chat import ChatRequest
 
 router = APIRouter(tags=["chat"])
 
-TITLE_MAX_LEN = 60
-
-
 def _derive_title(message: str) -> str | None:
-    """First ~60 chars of a user's first message in a session, truncated on
-    a word boundary when there's a reasonably close one -- good enough for a
-    session-list label, not meant to be a perfect summary. Returns `None`
-    for an empty/whitespace-only message (leaves `title` NULL rather than
-    storing an empty string, so the frontend's "New conversation" fallback
-    still kicks in)."""
+    """The user's first message in a session, stored IN FULL -- truncation
+    is a presentation concern, not a storage one (the sidebar clips with a
+    CSS ellipsis; clipping here would throw away data the display layer can
+    never get back). `title` is a TEXT column, so length is a non-issue.
+    Returns `None` for an empty/whitespace-only message (leaves `title` NULL
+    rather than storing an empty string, so the frontend's "New
+    conversation" fallback still kicks in)."""
     text = message.strip()
-    if not text:
-        return None
-    if len(text) <= TITLE_MAX_LEN:
-        return text
-    truncated = text[:TITLE_MAX_LEN]
-    last_space = truncated.rfind(" ")
-    # Only snap to the word boundary if it doesn't throw away too much of
-    # the budget (avoids a near-empty title for one long unbroken token).
-    if last_space > TITLE_MAX_LEN // 2:
-        truncated = truncated[:last_space]
-    return truncated.rstrip() + "…"
+    return text or None
 
 
 async def ensure_session_ownership(
@@ -138,9 +126,10 @@ async def ensure_session_ownership(
     Also does this feature's session-list bookkeeping in the same place
     rows get created/looked up (per the phase brief): `updated_at` is
     touched to "now" on creation AND on every subsequent turn for an
-    existing session, and `title` is set exactly once -- from the first
-    ~60 chars of `message` -- the moment it's still NULL, never overwritten
-    by a later turn's message. `message` is optional (callers that aren't
+    existing session, and `title` is set exactly once -- the full text of
+    the first `message` (see `_derive_title`) -- the moment it's still
+    NULL, never overwritten by a later turn's message. `message` is
+    optional (callers that aren't
     inside an actual chat turn, if any ever call this, simply skip the
     title-setting part) but both existing call sites always pass one.
     """
