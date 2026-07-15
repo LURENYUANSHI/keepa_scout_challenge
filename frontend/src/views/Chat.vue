@@ -158,22 +158,6 @@ function selectSession(session) {
   router.push({ name: 'chat', params: { sessionId: session.session_id } })
 }
 
-// `active_filters` always carries backend defaults (sort/limit) even when
-// the user never asked to filter — hide those so the panel only appears
-// for filters the user actually set.
-const DEFAULT_FILTER_KEYS = new Set(['sort', 'limit'])
-
-const displayFilters = computed(() => {
-  const filters = sessionState.value.active_filters || {}
-  return Object.fromEntries(
-    Object.entries(filters).filter(([key]) => !DEFAULT_FILTER_KEYS.has(key)),
-  )
-})
-
-const hasActiveFilters = computed(() =>
-  Boolean(Object.keys(displayFilters.value).length || sessionState.value.resolved_entity),
-)
-
 // Auto-follow: stay pinned to the bottom while deltas stream in, but the
 // moment the user scrolls up to re-read something, stop yanking them back
 // down on every token. Deliberate actions (sending a message, switching
@@ -470,18 +454,6 @@ function startNewChat() {
         {{ historyError }}
       </p>
 
-      <details v-if="hasActiveFilters" class="panel filters-disclosure">
-        <summary>Active filters &amp; state</summary>
-        <div class="tag-row" style="margin-top: var(--space-3)">
-          <span v-for="(value, key) in displayFilters" :key="key" class="chip" style="cursor: default">
-            {{ key }}: {{ value }}
-          </span>
-          <span v-if="sessionState.resolved_entity" class="chip" style="cursor: default">
-            resolved: {{ sessionState.resolved_entity }}
-          </span>
-        </div>
-      </details>
-
       <section class="panel transcript-panel">
         <div ref="transcriptEl" class="transcript" @scroll.passive="onTranscriptScroll">
           <p v-if="historyLoading" class="empty-hint">Loading conversation…</p>
@@ -688,20 +660,6 @@ function startNewChat() {
 
 .chat-main > .banner {
   margin: 0 0 var(--space-5);
-}
-
-.filters-disclosure {
-  margin: 0 0 var(--space-5);
-  padding: var(--space-4) var(--space-5);
-}
-
-.filters-disclosure summary {
-  cursor: pointer;
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  letter-spacing: -0.005em;
-  color: var(--steel);
 }
 
 .transcript-panel {
